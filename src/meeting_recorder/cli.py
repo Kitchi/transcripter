@@ -38,6 +38,17 @@ def main() -> None:
         help="Capture only; keep chunk WAVs, skip transcription.",
     )
     rec.add_argument(
+        "--summary-model",
+        type=Path,
+        default=None,
+        help="Local MLX model dir for the summary (default: ~/.omlx gemma-4-e4b).",
+    )
+    rec.add_argument(
+        "--no-summary",
+        action="store_true",
+        help="Skip the post-meeting summary.",
+    )
+    rec.add_argument(
         "--keep-audio",
         action="store_true",
         help="Retain chunk WAVs after transcription (default: delete).",
@@ -89,7 +100,20 @@ def main() -> None:
     if worker is not None:
         logging.info("waiting for transcription to finish...")
         worker.finish()
-        logging.info("transcript: %s", out / "transcript.md")
+        transcript_path = out / "transcript.md"
+        if not args.no_summary and worker.builder.segments:
+            from .summarizer import DEFAULT_MODEL, MlxLmSummarizer
+
+            logging.info("summarizing...")
+            summarizer = MlxLmSummarizer(args.summary_model or DEFAULT_MODEL)
+            try:
+                summary = summarizer.summarize(transcript_path.read_text())
+                transcript_path.write_text(
+                    summary + "\n\n---\n\n" + transcript_path.read_text()
+                )
+            except Exception:
+                logging.exception("summarization failed; transcript left as-is")
+        logging.info("transcript: %s", transcript_path)
 
 
 if __name__ == "__main__":
