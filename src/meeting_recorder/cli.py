@@ -27,6 +27,21 @@ def main() -> None:
         default=45.0,
         help="Stop after this much sustained silence (0 disables).",
     )
+    rec.add_argument(
+        "--model",
+        default="mlx-community/whisper-large-v3-turbo",
+        help="mlx-whisper model repo (HuggingFace).",
+    )
+    rec.add_argument(
+        "--no-transcribe",
+        action="store_true",
+        help="Capture only; keep chunk WAVs, skip transcription.",
+    )
+    rec.add_argument(
+        "--keep-audio",
+        action="store_true",
+        help="Retain chunk WAVs after transcription (default: delete).",
+    )
 
     args = parser.parse_args()
     logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
@@ -54,8 +69,27 @@ def main() -> None:
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
     session = capture.CaptureSession(cfg, mic_device=mic, system_device=system)
+
+    worker = None
+    if not args.no_transcribe:
+        from .transcriber import MlxWhisperBackend
+        from .worker import TranscriptionWorker
+
+        worker = TranscriptionWorker(
+            backend=MlxWhisperBackend(args.model),
+            out_path=out / "transcript.md",
+            overlap_seconds=cfg.overlap_seconds,
+            keep_audio=args.keep_audio,
+        )
+        worker.start()
+        session.on_chunk = worker.enqueue
+
     reason = session.run()
     logging.info("session ended (%s): %d chunks", reason, len(session.chunk_files))
+    if worker is not None:
+        logging.info("waiting for transcription to finish...")
+        worker.finish()
+        logging.info("transcript: %s", out / "transcript.md")
 
 
 if __name__ == "__main__":
