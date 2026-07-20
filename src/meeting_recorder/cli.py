@@ -29,8 +29,9 @@ def main() -> None:
     )
     rec.add_argument(
         "--model",
-        default="mlx-community/whisper-large-v3-turbo",
-        help="mlx-whisper model repo (HuggingFace).",
+        default=None,
+        help="Whisper model (default: platform backend's default -- an mlx-whisper "
+        "HF repo on macOS, a faster-whisper model name on Linux).",
     )
     rec.add_argument(
         "--no-transcribe",
@@ -41,7 +42,8 @@ def main() -> None:
         "--summary-model",
         type=Path,
         default=None,
-        help="Local MLX model dir for the summary (default: ~/.omlx gemma-4-e4b).",
+        help="Summary model (default: platform backend's default -- an MLX model dir "
+        "on macOS, a GGUF file on Linux).",
     )
     rec.add_argument(
         "--no-summary",
@@ -66,7 +68,7 @@ def main() -> None:
     )
 
     mic = devices.default_mic()
-    system = devices.find_blackhole()
+    system = devices.find_system_capture()
     logging.info("mic: %s", devices.describe(mic))
     logging.info("system: %s", devices.describe(system))
     logging.info("session dir: %s", out)
@@ -83,11 +85,11 @@ def main() -> None:
 
     worker = None
     if not args.no_transcribe:
-        from .transcriber import MlxWhisperBackend
+        from .transcriber import make_backend
         from .worker import TranscriptionWorker
 
         worker = TranscriptionWorker(
-            backend=MlxWhisperBackend(args.model),
+            backend=make_backend(args.model),
             out_path=out / "transcript.md",
             overlap_seconds=cfg.overlap_seconds,
             keep_audio=args.keep_audio,
@@ -102,10 +104,10 @@ def main() -> None:
         worker.finish()
         transcript_path = out / "transcript.md"
         if not args.no_summary and worker.builder.segments:
-            from .summarizer import DEFAULT_MODEL, MlxLmSummarizer
+            from .summarizer import make_summarizer
 
             logging.info("summarizing...")
-            summarizer = MlxLmSummarizer(args.summary_model or DEFAULT_MODEL)
+            summarizer = make_summarizer(args.summary_model)
             try:
                 summary = summarizer.summarize(transcript_path.read_text())
                 transcript_path.write_text(

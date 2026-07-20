@@ -7,8 +7,21 @@ requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26",
     "sounddevice>=0.4.6",
+    # macOS: Metal-accelerated via Apple's MLX (prebuilt wheels).
     "mlx-whisper>=0.4 ; sys_platform == 'darwin'",
-    "mlx-lm>=0.31.3",
+    "mlx-lm>=0.31.3 ; sys_platform == 'darwin'",
+    # Linux: CPU by default. For GPU, install the [gpu] extra AND build
+    # llama-cpp-python with CUDA (see README).
+    "faster-whisper>=1.0 ; sys_platform == 'linux'",
+    "llama-cpp-python>=0.3 ; sys_platform == 'linux'",
+]
+
+[project.optional-dependencies]
+# Linux GPU: CUDA runtime libs for CTranslate2 (faster-whisper). This alone
+# enables GPU transcription; the summarizer needs a CUDA build (see README).
+gpu = [
+    "nvidia-cublas-cu12 ; sys_platform == 'linux'",
+    "nvidia-cudnn-cu12 ; sys_platform == 'linux'",
 ]
 
 [project.scripts]

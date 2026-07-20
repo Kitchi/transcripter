@@ -1,8 +1,26 @@
-"""Summarization backend: mlx-lm over a local MLX model (default: gemma-4-e4b)."""
+"""Summarization backends.
 
+Selected by platform (see `make_summarizer`):
+- macOS: mlx-lm over a local MLX model (default: gemma-4-e4b).
+- Linux: llama-cpp-python over a GGUF model (CUDA if built with it, else CPU).
+"""
+
+import sys
 from pathlib import Path
 
 DEFAULT_MODEL = Path.home() / ".omlx/models/gemma-4-e4b-it-4bit"
+
+# Linux default: pulled from HuggingFace on first use via llama-cpp's
+# from_pretrained. Override with --summary-model (a local .gguf path).
+LLAMA_DEFAULT_REPO = "bartowski/gemma-2-2b-it-GGUF"
+LLAMA_DEFAULT_FILE = "gemma-2-2b-it-Q4_K_M.gguf"
+
+
+def make_summarizer(model: str | Path | None = None):
+    """Pick the summarization backend for the current platform."""
+    if sys.platform == "darwin":
+        return MlxLmSummarizer(model or DEFAULT_MODEL)
+    return LlamaCppSummarizer(model)
 
 PROMPT = """\
 Below is a meeting transcript. "me" is the local user; "them" is the other side
@@ -52,3 +70,37 @@ class MlxLmSummarizer:
             tokenize=False,
         )
         return generate(model, tokenizer, prompt=prompt, max_tokens=self.max_tokens).strip()
+
+
+class LlamaCppSummarizer:
+    def __init__(self, model: str | Path | None = None, max_tokens: int = 1024):
+        self.model = model  # local .gguf path, or None for the HF default
+        self.max_tokens = max_tokens
+
+    def _load(self):
+        from llama_cpp import Llama  # deferred: heavy native import
+
+        # n_gpu_layers=-1 offloads everything to the GPU when the build has
+        # CUDA; a CPU-only build ignores it and runs on CPU.
+        if self.model is None:
+            return Llama.from_pretrained(
+                repo_id=LLAMA_DEFAULT_REPO,
+                filename=LLAMA_DEFAULT_FILE,
+                n_gpu_layers=-1,
+                n_ctx=8192,
+                verbose=False,
+            )
+        return Llama(
+            model_path=str(Path(self.model).expanduser()),
+            n_gpu_layers=-1,
+            n_ctx=8192,
+            verbose=False,
+        )
+
+    def summarize(self, transcript_md: str) -> str:
+        llm = self._load()
+        out = llm.create_chat_completion(
+            messages=[{"role": "user", "content": PROMPT.format(transcript=transcript_md)}],
+            max_tokens=self.max_tokens,
+        )
+        return out["choices"][0]["message"]["content"].strip()
