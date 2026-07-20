@@ -73,8 +73,8 @@ def main() -> None:
     if args.out:
         out = args.out
     else:
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        leaf = f"{args.name}-{timestamp}" if args.name else timestamp
+        date = datetime.now().strftime("%Y-%m-%d")
+        leaf = f"{date}-{args.name}" if args.name else f"{date}-meeting"
         out = args.sessions_dir / leaf
     cfg = Config(
         out_dir=out,
@@ -132,7 +132,78 @@ def main() -> None:
                 )
             except Exception:
                 logging.exception("summarization failed; transcript left as-is")
-        logging.info("transcript: %s", transcript_path)
+        final_path = _flatten_session(
+            out, transcript_path, session.chunk_files, cfg.sample_rate, args.keep_audio
+        )
+        logging.info("transcript: %s", final_path)
+
+
+def _unique_path(path: Path) -> Path:
+    """Return `path`, or `path` with a -2, -3... suffix if it already exists."""
+    if not path.exists():
+        return path
+    stem, suffix, parent = path.stem, path.suffix, path.parent
+    n = 2
+    while (candidate := parent / f"{stem}-{n}{suffix}").exists():
+        n += 1
+    return candidate
+
+
+def _flatten_session(out, transcript_path, chunk_files, sample_rate, keep_audio) -> Path:
+    """Move transcript.md up to <session-dir>.md.
+
+    Normally the session folder is removed afterwards. With ``keep_audio`` the
+    overlapping chunk WAVs are concatenated into a single ``recording.wav`` and
+    the folder is kept holding just that file.
+    """
+    import shutil
+
+    final_path = _unique_path(out.parent / f"{out.name}.md")
+    transcript_path.rename(final_path)
+    if keep_audio and chunk_files:
+        _concat_recording(out / "recording.wav", chunk_files, sample_rate)
+        shutil.rmtree(out / "chunks", ignore_errors=True)
+    else:
+        shutil.rmtree(out)
+    return final_path
+
+
+def _concat_recording(dest, chunk_files, sample_rate) -> None:
+    """Reconstruct a stereo WAV from the overlapping per-channel chunks.
+
+    Each chunk is placed at its absolute sample offset (overlaps overwrite with
+    identical audio), rebuilding a continuous track per channel. Mic goes to the
+    left channel, system to the right -- kept separate so neither can clip.
+    """
+    import numpy as np
+
+    from .capture import MIC, SYSTEM
+    from .wavio import read_wav, write_wav_stereo
+
+    tracks = _reconstruct_tracks(chunk_files, sample_rate, np, read_wav)
+    n = max((len(t) for t in tracks.values()), default=0)
+    left = tracks.get(MIC, np.zeros(n, dtype=np.float32))
+    right = tracks.get(SYSTEM, np.zeros(n, dtype=np.float32))
+    write_wav_stereo(dest, left, right, sample_rate)
+
+
+def _reconstruct_tracks(chunk_files, sample_rate, np, read_wav) -> dict:
+    """Place each channel's overlapping chunks into one continuous track."""
+    placements: dict[str, list[tuple[int, "object"]]] = {}
+    total = 0
+    for cf in chunk_files:
+        audio = read_wav(cf.path, target_rate=sample_rate)
+        start = round(cf.start_seconds * sample_rate)
+        placements.setdefault(cf.channel, []).append((start, audio))
+        total = max(total, start + len(audio))
+
+    tracks = {}
+    for channel, placed in placements.items():
+        track = np.zeros(total, dtype=np.float32)
+        for start, audio in placed:
+            track[start : start + len(audio)] = audio
+        tracks[channel] = track
+    return tracks
 
 
 if __name__ == "__main__":

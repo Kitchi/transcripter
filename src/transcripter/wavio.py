@@ -16,6 +16,26 @@ def write_wav(path: Path, samples: np.ndarray, sample_rate: int) -> None:
         w.writeframes(pcm.tobytes())
 
 
+def write_wav_stereo(
+    path: Path, left: np.ndarray, right: np.ndarray, sample_rate: int
+) -> None:
+    """Write two mono float32 tracks in [-1, 1] as a 16-bit stereo PCM WAV.
+
+    Tracks are zero-padded to equal length; left/right stay independent so
+    summing is never needed and neither channel can clip the other.
+    """
+    n = max(len(left), len(right))
+    stereo = np.zeros((n, 2), dtype=np.float32)
+    stereo[: len(left), 0] = left
+    stereo[: len(right), 1] = right
+    pcm = (np.clip(stereo, -1.0, 1.0) * 32767).astype(np.int16)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm.tobytes())
+
+
 WHISPER_RATE = 16_000
 
 
