@@ -79,14 +79,16 @@ are safe to ship to CPU-only machines.
 ## Usage
 
 ```sh
-uv run meeting-recorder record            # records into sessions/<timestamp>/
+uv run meeting-recorder record            # records into ./<timestamp>/
 ```
 
 Stop with `Ctrl-C`, or let the silence watchdog stop it for you. Useful flags:
 
 | Flag | Default | |
 |---|---|---|
-| `--out DIR` | `sessions/<timestamp>` | Session directory |
+| `--out DIR` | | Full session path (overrides the two below) |
+| `--sessions-dir DIR` | current dir | Base directory for session folders |
+| `--name NAME` | | Prefixed to the timestamp leaf, e.g. `standup-<timestamp>` |
 | `--model NAME` | platform default | Whisper model (mlx HF repo / faster-whisper name) |
 | `--summary-model PATH` | platform default | Summary model (MLX dir / GGUF file) |
 | `--no-summary` | | Skip the post-meeting summary |
@@ -94,7 +96,7 @@ Stop with `Ctrl-C`, or let the silence watchdog stop it for you. Useful flags:
 | `--keep-audio` | | Retain chunk WAVs after transcription |
 | `--silence-stop-seconds N` | `45` | Silence watchdog (0 disables) |
 
-Everything ends up in one file: `sessions/<timestamp>/transcript.md` — summary
+Everything ends up in one file: `<session-dir>/transcript.md` — summary
 on top, timestamped `me`/`them` transcript below.
 
 ## Caveats

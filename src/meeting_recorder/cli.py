@@ -17,7 +17,18 @@ def main() -> None:
         "--out",
         type=Path,
         default=None,
-        help="Session directory (default: sessions/<timestamp>)",
+        help="Full session directory path; overrides --sessions-dir/--name.",
+    )
+    rec.add_argument(
+        "--sessions-dir",
+        type=Path,
+        default=Path.cwd(),
+        help="Base directory for session folders (default: current directory).",
+    )
+    rec.add_argument(
+        "--name",
+        default=None,
+        help="Recording name, prefixed to the timestamp (e.g. standup-20260720-143000).",
     )
     rec.add_argument("--chunk-seconds", type=float, default=30.0)
     rec.add_argument("--overlap-seconds", type=float, default=2.0)
@@ -59,7 +70,12 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 
-    out = args.out or Path("sessions") / datetime.now().strftime("%Y%m%d-%H%M%S")
+    if args.out:
+        out = args.out
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        leaf = f"{args.name}-{timestamp}" if args.name else timestamp
+        out = args.sessions_dir / leaf
     cfg = Config(
         out_dir=out,
         chunk_seconds=args.chunk_seconds,
