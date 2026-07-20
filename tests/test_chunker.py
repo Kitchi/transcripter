@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from meeting_recorder.chunker import OverlappingChunker
+from transcripter.chunker import OverlappingChunker
 
 
 def collect(chunker, samples, block=1000):

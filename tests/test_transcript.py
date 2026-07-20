@@ -1,4 +1,4 @@
-from meeting_recorder.transcript import TranscriptBuilder
+from transcripter.transcript import TranscriptBuilder
 
 
 def seg(start, end, text):

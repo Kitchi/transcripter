@@ -26,6 +26,10 @@ class Config:
     # Emit an RMS status line every this many seconds.
     status_interval_seconds: float = 5.0
 
+    # Chunks below this RMS are skipped before transcription: Whisper
+    # hallucinates high-prior phrases ("Thank you") on silence.
+    transcribe_rms_floor: float = 1e-3
+
     @property
     def chunk_samples(self) -> int:
         return int(self.chunk_seconds * self.sample_rate)

@@ -1,4 +1,4 @@
-from meeting_recorder.watchdog import SilenceWatchdog, State
+from transcripter.watchdog import SilenceWatchdog, State
 
 
 def make(**overrides):

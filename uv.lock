@@ -471,50 +471,6 @@ wheels = [
 ]
 
 [[package]]
-name = "meeting-recorder"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "faster-whisper", marker = "sys_platform == 'linux'" },
-    { name = "llama-cpp-python", marker = "sys_platform == 'linux'" },
-    { name = "mlx-lm", marker = "sys_platform == 'darwin'" },
-    { name = "mlx-whisper", marker = "sys_platform == 'darwin'" },
-    { name = "numpy" },
-    { name = "sounddevice" },
-]
-
-[package.optional-dependencies]
-gpu = [
-    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux'" },
-    { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'linux'" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "faster-whisper", marker = "sys_platform == 'linux'", specifier = ">=1.0" },
-    { name = "llama-cpp-python", marker = "sys_platform == 'linux'", specifier = ">=0.3" },
-    { name = "mlx-lm", marker = "sys_platform == 'darwin'", specifier = ">=0.31.3" },
-    { name = "mlx-whisper", marker = "sys_platform == 'darwin'", specifier = ">=0.4" },
-    { name = "numpy", specifier = ">=1.26" },
-    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux' and extra == 'gpu'" },
-    { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'linux' and extra == 'gpu'" },
-    { name = "sounddevice", specifier = ">=0.4.6" },
-]
-provides-extras = ["gpu"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "ruff", specifier = ">=0.4" },
-]
-
-[[package]]
 name = "mlx"
 version = "0.32.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1180,6 +1136,50 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/8c/69/40407dfc835517f058b603dbf37a6df094d8582b015a51eddc988febbcb7/tqdm-4.69.0.tar.gz", hash = "sha256:700c5e85dcd5f009dd6222588a29180a193a748247a5d855b4d67db93d79a53b", size = 792569, upload-time = "2026-07-17T18:09:06.2Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fe/21/99a0cdaf54eb35e77623c41b5a2c9472ee4404bba687052791fe2aba6773/tqdm-4.69.0-py3-none-any.whl", hash = "sha256:9979978912be667a6ef21fd5d8abf54e324e63d82f7f43c360792ebc2bc4e622", size = 676680, upload-time = "2026-07-17T18:09:04.172Z" },
+]
+
+[[package]]
+name = "transcripter"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "faster-whisper", marker = "sys_platform == 'linux'" },
+    { name = "llama-cpp-python", marker = "sys_platform == 'linux'" },
+    { name = "mlx-lm", marker = "sys_platform == 'darwin'" },
+    { name = "mlx-whisper", marker = "sys_platform == 'darwin'" },
+    { name = "numpy" },
+    { name = "sounddevice" },
+]
+
+[package.optional-dependencies]
+gpu = [
+    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'linux'" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "faster-whisper", marker = "sys_platform == 'linux'", specifier = ">=1.0" },
+    { name = "llama-cpp-python", marker = "sys_platform == 'linux'", specifier = ">=0.3" },
+    { name = "mlx-lm", marker = "sys_platform == 'darwin'", specifier = ">=0.31.3" },
+    { name = "mlx-whisper", marker = "sys_platform == 'darwin'", specifier = ">=0.4" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux' and extra == 'gpu'" },
+    { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'linux' and extra == 'gpu'" },
+    { name = "sounddevice", specifier = ">=0.4.6" },
+]
+provides-extras = ["gpu"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "ruff", specifier = ">=0.4" },
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-# meeting-recorder
+# transcripter
 
 Local, bot-free meeting transcription for macOS and Linux. Captures your mic and
 system audio, transcribes live, and summarizes with a local LLM. **No cloud, no
@@ -79,7 +79,7 @@ are safe to ship to CPU-only machines.
 ## Usage
 
 ```sh
-uv run meeting-recorder record            # records into ./<timestamp>/
+uv run transcripter record                # records into ./<timestamp>/
 ```
 
 Stop with `Ctrl-C`, or let the silence watchdog stop it for you. Useful flags:

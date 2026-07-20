@@ -6,9 +6,10 @@ import threading
 import time
 from pathlib import Path
 
-from .capture import ChunkFile
+from .capture import ChunkFile, rms
 from .transcriber import Backend
 from .transcript import TranscriptBuilder
+from .wavio import read_wav
 
 log = logging.getLogger(__name__)
 
@@ -22,10 +23,12 @@ class TranscriptionWorker:
         out_path: Path,
         overlap_seconds: float,
         keep_audio: bool = False,
+        rms_floor: float = 0.0,
     ):
         self.backend = backend
         self.out_path = out_path
         self.keep_audio = keep_audio
+        self.rms_floor = rms_floor
         self.builder = TranscriptBuilder(overlap_seconds=overlap_seconds)
         self._queue: queue.Queue[ChunkFile | None] = queue.Queue()
         self._thread = threading.Thread(target=self._run, name="transcriber", daemon=True)
@@ -55,6 +58,18 @@ class TranscriptionWorker:
 
     def _process(self, chunk: ChunkFile) -> None:
         t0 = time.monotonic()
+        if self.rms_floor > 0:
+            level = rms(read_wav(chunk.path))
+            if level < self.rms_floor:
+                log.info(
+                    "skipped %s: silent (rms=%.5f < %.5f)",
+                    chunk.path.name,
+                    level,
+                    self.rms_floor,
+                )
+                if not self.keep_audio:
+                    chunk.path.unlink(missing_ok=True)
+                return
         segments = self.backend.transcribe(chunk.path)
         self.builder.add_chunk(chunk.channel, chunk.index, chunk.start_seconds, segments)
         self.out_path.write_text(self.builder.render())

@@ -38,7 +38,11 @@ class MlxWhisperBackend:
         # Pass samples directly; mlx_whisper's file loader shells out to ffmpeg,
         # which we don't want to depend on.
         samples = read_wav(path)
-        result = mlx_whisper.transcribe(samples, path_or_hf_repo=self.model)
+        # condition_on_previous_text=False: stop a hallucinated phrase in one
+        # chunk from seeding the next.
+        result = mlx_whisper.transcribe(
+            samples, path_or_hf_repo=self.model, condition_on_previous_text=False
+        )
         return [
             {"start": s["start"], "end": s["end"], "text": s["text"]}
             for s in result["segments"]
@@ -62,5 +66,9 @@ class FasterWhisperBackend:
         # read_wav yields 16 kHz mono float32, which faster-whisper consumes
         # directly (no PyAV/ffmpeg decode needed).
         samples = read_wav(path)
-        segments, _info = self._get().transcribe(samples)
+        # vad_filter drops non-speech; condition_on_previous_text=False keeps a
+        # hallucination from seeding later chunks.
+        segments, _info = self._get().transcribe(
+            samples, vad_filter=True, condition_on_previous_text=False
+        )
         return [{"start": s.start, "end": s.end, "text": s.text} for s in segments]

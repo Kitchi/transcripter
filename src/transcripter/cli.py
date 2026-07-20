@@ -109,6 +109,7 @@ def main() -> None:
             out_path=out / "transcript.md",
             overlap_seconds=cfg.overlap_seconds,
             keep_audio=args.keep_audio,
+            rms_floor=cfg.transcribe_rms_floor,
         )
         worker.start()
         session.on_chunk = worker.enqueue
