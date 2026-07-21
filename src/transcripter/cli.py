@@ -67,8 +67,32 @@ def main() -> None:
         help="Retain chunk WAVs after transcription (default: delete).",
     )
 
+    note = sub.add_parser(
+        "note",
+        help="Mic-only voice note: transcribe, then write a directive-steered summary.",
+    )
+    note.add_argument("--out", type=Path, default=None, help="Full session directory path.")
+    note.add_argument("--sessions-dir", type=Path, default=Path.cwd())
+    note.add_argument("--name", default=None, help="Note name, prefixed to the date.")
+    note.add_argument("--chunk-seconds", type=float, default=30.0)
+    note.add_argument("--overlap-seconds", type=float, default=2.0)
+    note.add_argument(
+        "--silence-stop-seconds",
+        type=float,
+        default=45.0,
+        help="Stop after this much sustained mic silence (0 disables).",
+    )
+    note.add_argument("--model", default=None, help="Whisper model (platform default if unset).")
+    note.add_argument(
+        "--summary-model", type=Path, default=None, help="Summary model (platform default if unset)."
+    )
+
     args = parser.parse_args()
     logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
+
+    if args.command == "note":
+        _run_note(args)
+        return
 
     if args.out:
         out = args.out
@@ -97,7 +121,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _graceful_stop)
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
-    session = capture.CaptureSession(cfg, mic_device=mic, system_device=system)
+    session = capture.CaptureSession(cfg, devices={capture.MIC: mic, capture.SYSTEM: system})
 
     worker = None
     if not args.no_transcribe:
@@ -136,6 +160,78 @@ def main() -> None:
             out, transcript_path, session.chunk_files, cfg.sample_rate, args.keep_audio
         )
         logging.info("transcript: %s", final_path)
+
+
+def _session_dir(args, default_leaf: str) -> Path:
+    """Resolve the session directory from --out or --sessions-dir/--name."""
+    if args.out:
+        return args.out
+    date = datetime.now().strftime("%Y-%m-%d")
+    leaf = f"{date}-{args.name}" if args.name else f"{date}-{default_leaf}"
+    return args.sessions_dir / leaf
+
+
+def _install_signal_handlers() -> None:
+    """Route SIGTERM through the graceful Ctrl-C path; restore SIGINT for bg jobs."""
+
+    def _graceful_stop(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _graceful_stop)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+
+
+def _run_note(args) -> None:
+    """Mic-only note: capture -> ephemeral transcript -> directive-steered summary."""
+    from .summarizer import NOTE_PROMPT, make_summarizer
+    from .transcriber import make_backend
+    from .worker import TranscriptionWorker
+
+    out = _session_dir(args, "note")
+    cfg = Config(
+        out_dir=out,
+        chunk_seconds=args.chunk_seconds,
+        overlap_seconds=args.overlap_seconds,
+        silence_stop_seconds=args.silence_stop_seconds or float("inf"),
+    )
+
+    mic = devices.default_mic()
+    logging.info("mic: %s", devices.describe(mic))
+    logging.info("session dir: %s", out)
+
+    _install_signal_handlers()
+
+    session = capture.CaptureSession(cfg, devices={capture.MIC: mic})
+    transcript_path = out / "transcript.md"
+    worker = TranscriptionWorker(
+        backend=make_backend(args.model),
+        out_path=transcript_path,
+        overlap_seconds=cfg.overlap_seconds,
+        rms_floor=cfg.transcribe_rms_floor,
+        label_speakers=False,
+    )
+    worker.start()
+    session.on_chunk = worker.enqueue
+
+    reason = session.run()
+    logging.info("session ended (%s): %d chunks", reason, len(session.chunk_files))
+    logging.info("waiting for transcription to finish...")
+    worker.finish()
+
+    import shutil
+
+    note_path = _unique_path(out.parent / f"{out.name}.md")
+    if not worker.builder.segments:
+        logging.warning("no speech transcribed; nothing to summarize")
+        shutil.rmtree(out, ignore_errors=True)
+        return
+
+    logging.info("summarizing note...")
+    summarizer = make_summarizer(args.summary_model)
+    summary = summarizer.summarize(transcript_path.read_text(), prompt=NOTE_PROMPT)
+    note_path.write_text(summary + "\n")
+    shutil.rmtree(out, ignore_errors=True)
+    logging.info("note: %s", note_path)
 
 
 def _unique_path(path: Path) -> Path:

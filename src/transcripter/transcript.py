@@ -16,6 +16,7 @@ class Segment:
 @dataclass
 class TranscriptBuilder:
     overlap_seconds: float
+    label_speakers: bool = True  # False for single-voice notes: no me/them tags
     segments: list[Segment] = field(default_factory=list)
 
     def add_chunk(
@@ -50,8 +51,11 @@ class TranscriptBuilder:
     def render(self) -> str:
         lines = ["# Transcript", ""]
         for seg in sorted(self.segments, key=lambda s: (s.start, s.channel)):
-            label = CHANNEL_LABELS.get(seg.channel, seg.channel)
-            lines.append(f"`[{_fmt(seg.start)}]` **{label}**: {seg.text}")
+            if self.label_speakers:
+                label = CHANNEL_LABELS.get(seg.channel, seg.channel)
+                lines.append(f"`[{_fmt(seg.start)}]` **{label}**: {seg.text}")
+            else:
+                lines.append(f"`[{_fmt(seg.start)}]` {seg.text}")
             lines.append("")
         return "\n".join(lines)
 

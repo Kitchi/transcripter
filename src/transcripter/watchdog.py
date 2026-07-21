@@ -38,8 +38,14 @@ class SilenceWatchdog:
     def silence_elapsed(self) -> float:
         return self._silence_elapsed
 
-    def update(self, mic_rms: float, system_rms: float, block_seconds: float) -> bool:
-        """Feed one block's RMS per channel. Returns True when recording should stop."""
+    def update(
+        self, mic_rms: float, system_rms: float | None, block_seconds: float
+    ) -> bool:
+        """Feed one block's RMS per channel. Returns True when recording should stop.
+
+        ``system_rms`` is ``None`` in mic-only sessions (e.g. note mode), where
+        activity is decided by the mic alone.
+        """
         if self.state is State.CALIBRATING:
             self._calibration_samples.append(mic_rms)
             self._calibration_elapsed += block_seconds
@@ -51,7 +57,9 @@ class SilenceWatchdog:
                 self.state = State.WAITING_FOR_SPEECH
             return False
 
-        active = mic_rms > self.mic_speech_threshold or system_rms > self.system_rms_threshold
+        active = mic_rms > self.mic_speech_threshold or (
+            system_rms is not None and system_rms > self.system_rms_threshold
+        )
 
         if self.state is State.WAITING_FOR_SPEECH:
             if active:

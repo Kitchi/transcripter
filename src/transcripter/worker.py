@@ -24,12 +24,15 @@ class TranscriptionWorker:
         overlap_seconds: float,
         keep_audio: bool = False,
         rms_floor: float = 0.0,
+        label_speakers: bool = True,
     ):
         self.backend = backend
         self.out_path = out_path
         self.keep_audio = keep_audio
         self.rms_floor = rms_floor
-        self.builder = TranscriptBuilder(overlap_seconds=overlap_seconds)
+        self.builder = TranscriptBuilder(
+            overlap_seconds=overlap_seconds, label_speakers=label_speakers
+        )
         self._queue: queue.Queue[ChunkFile | None] = queue.Queue()
         self._thread = threading.Thread(target=self._run, name="transcriber", daemon=True)
         self._errors = 0

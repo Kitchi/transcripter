@@ -41,13 +41,33 @@ Transcript:
 {transcript}
 """
 
+# Note mode: a single-voice dictated note. The speaker's opening words may steer
+# the output format, so the model must both obey that and strip it from the body.
+NOTE_PROMPT = """\
+Below is a transcript of a spoken note dictated by one person.
+
+The speaker's opening words may be an instruction for how to format the rest --
+for example "make a bullet list", "turn this into a to-do list", or "this is a
+technical summary for a GitHub ticket". If the opening is such an instruction,
+follow it and do NOT include the instruction itself as content. If the opening
+is not an instruction, default to a short titled summary followed by bullet
+points of the substantive content.
+
+Write clean markdown. Output only the finished note -- no preamble, no mention of
+these directions.
+
+Note:
+
+{transcript}
+"""
+
 
 class MlxLmSummarizer:
     def __init__(self, model: str | Path = DEFAULT_MODEL, max_tokens: int = 1024):
         self.model_path = Path(model).expanduser()
         self.max_tokens = max_tokens
 
-    def summarize(self, transcript_md: str) -> str:
+    def summarize(self, transcript_md: str, prompt: str = PROMPT) -> str:
         # Deferred heavy imports, mirroring transcriber.py.
         from mlx_lm.generate import generate
         from mlx_lm.tokenizer_utils import TokenizerWrapper
@@ -65,7 +85,7 @@ class MlxLmSummarizer:
         tokenizer = TokenizerWrapper(hf_tok, eos_token_ids=eos_ids)
 
         prompt = hf_tok.apply_chat_template(
-            [{"role": "user", "content": PROMPT.format(transcript=transcript_md)}],
+            [{"role": "user", "content": prompt.format(transcript=transcript_md)}],
             add_generation_prompt=True,
             tokenize=False,
         )
@@ -97,10 +117,10 @@ class LlamaCppSummarizer:
             verbose=False,
         )
 
-    def summarize(self, transcript_md: str) -> str:
+    def summarize(self, transcript_md: str, prompt: str = PROMPT) -> str:
         llm = self._load()
         out = llm.create_chat_completion(
-            messages=[{"role": "user", "content": PROMPT.format(transcript=transcript_md)}],
+            messages=[{"role": "user", "content": prompt.format(transcript=transcript_md)}],
             max_tokens=self.max_tokens,
         )
         return out["choices"][0]["message"]["content"].strip()

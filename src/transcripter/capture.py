@@ -73,14 +73,16 @@ class _Stream:
 
 
 class CaptureSession:
-    def __init__(self, cfg: Config, mic_device: int, system_device: int):
+    def __init__(self, cfg: Config, devices: dict[str, int]):
+        """`devices` maps channel name (MIC/SYSTEM) to a sounddevice index.
+
+        Mic-only sessions (note mode) pass just `{MIC: idx}`; the watchdog then
+        decides activity from the mic alone.
+        """
         self.cfg = cfg
         self.chunk_dir = cfg.out_dir / "chunks"
         self.chunk_dir.mkdir(parents=True, exist_ok=True)
-        self.streams = {
-            MIC: _Stream(MIC, mic_device, cfg),
-            SYSTEM: _Stream(SYSTEM, system_device, cfg),
-        }
+        self.streams = {ch: _Stream(ch, dev, cfg) for ch, dev in devices.items()}
         self.watchdog = SilenceWatchdog(
             silence_stop_seconds=cfg.silence_stop_seconds,
             calibration_seconds=cfg.calibration_seconds,
@@ -121,9 +123,9 @@ class CaptureSession:
                     data = s.drain()
                     for chunk in s.chunker.push(data):
                         self._write_chunk(channel, chunk)
-                if self.watchdog.update(
-                    self.streams[MIC].last_rms, self.streams[SYSTEM].last_rms, poll
-                ):
+                sys_stream = self.streams.get(SYSTEM)
+                sys_rms = sys_stream.last_rms if sys_stream else None
+                if self.watchdog.update(self.streams[MIC].last_rms, sys_rms, poll):
                     log.info("silence watchdog fired (%.0fs quiet)", cfg.silence_stop_seconds)
                     stop_reason = "silence"
                     break
@@ -131,9 +133,9 @@ class CaptureSession:
                 if now - last_status >= cfg.status_interval_seconds:
                     last_status = now
                     log.info(
-                        "mic_rms=%.4f sys_rms=%.4f state=%s",
+                        "mic_rms=%.4f sys_rms=%s state=%s",
                         self.streams[MIC].last_rms,
-                        self.streams[SYSTEM].last_rms,
+                        f"{sys_rms:.4f}" if sys_rms is not None else "-",
                         self.watchdog.state.name,
                     )
                     if self.watchdog.state is State.ARMED and self.watchdog.silence_elapsed > 0:

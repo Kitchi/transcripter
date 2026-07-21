@@ -99,6 +99,30 @@ Stop with `Ctrl-C`, or let the silence watchdog stop it for you. Useful flags:
 Everything ends up in one file: `<session-dir>/transcript.md` — summary
 on top, timestamped `me`/`them` transcript below.
 
+### Voice notes
+
+`note` mode is a mic-only variant for dictating a note to yourself. It captures
+**only** your mic (no BlackHole / system audio), transcribes it, and writes a
+single summarized note — the raw transcript is used to feed the summarizer and
+then discarded.
+
+```sh
+uv run transcripter note --name grocery-list   # writes ./<date>-grocery-list.md
+```
+
+**Spoken directives.** Whatever you say first is read as an instruction for how
+to shape the note, stripped from the body, and applied to the rest — for example:
+
+- *"Make this a to-do list. Pick up milk, call the dentist, renew the car
+  registration…"* → a checklist.
+- *"This is a technical summary for a GitHub ticket. The auth middleware drops
+  the session cookie when…"* → an issue-style write-up.
+
+Say nothing directive-like and it falls back to a titled summary with bullets.
+Stops on 45s of mic silence or `Ctrl-C`. Flags are the capture/model subset of
+`record`: `--out`, `--sessions-dir`, `--name`, `--chunk-seconds`,
+`--overlap-seconds`, `--silence-stop-seconds`, `--model`, `--summary-model`.
+
 ## Caveats
 
 - Anything said while muted in the meeting app still lands in `me` — capture is
