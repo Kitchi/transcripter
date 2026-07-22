@@ -104,15 +104,43 @@ ephemeral.
   (ad-hoc `-` works but re-prompts each rebuild). Paid Apple account only needed
   for notarization / distribution to other Macs.
 
-### Summarizer: long-meeting context overflow
-- **Current design is single-shot**: the whole transcript is stuffed into one prompt
-  (`summarizer.py`). No chunking.
-- ~90 min of talk ≈ 13–18k tokens. macOS Gemma 3n E4B (~32k ctx) usually fits but
-  quality sags near the top; **Linux llama-cpp is pinned to `n_ctx=8192`** and
-  silently truncates from the front → long meetings lose everything but the tail.
-- Fix: **map-reduce / hierarchical summarization** — token-bounded windows (aligned
-  on existing chunk boundaries, light overlap), summarize each, then summarize the
-  summaries. Bounds context regardless of meeting length. Own change, after the tap.
+### Summarizer: long-meeting context overflow (implemented)
+- **Problem**: single-shot summarization stuffed the whole transcript into one
+  prompt. ~90 min ≈ 13–18k tokens. macOS Gemma (~32k ctx) usually fit but quality
+  sagged near the top; **Linux llama-cpp was pinned to `n_ctx=8192`** and silently
+  truncated from the front → long meetings lost everything but the tail.
+- **Fix: map-reduce with a recursive reduce** (`summarizer.py`, `Summarizer`
+  base class over backend primitives):
+  - Backends expose `complete(text)`, `count_tokens(text)` /
+    `count_tokens_batch(texts)`, and `context_tokens`. No new dependency — both
+    backends already carry a tokenizer, so counts are exact. `count_tokens_batch`
+    tokenizes a whole window/level in one call (MLX); llama loops.
+  - **Context detection**: llama = `n_ctx`. MLX = `max_position_embeddings`, which
+    multimodal gemma exports **nest under `text_config`** (top-level is absent →
+    the naive read silently gave 8192 instead of 131072). We read the nested key
+    and clamp to `MLX_CONTEXT_CAP = 32k` — feeding 128k tokens to a 4-bit local
+    model is slow and low quality.
+  - **Budget**: `usable = context − max_output − prompt_overhead`; windows/batches
+    fill to **`FILL = 0.75`** of usable. Output budget is reserved *first*, so
+    packing input never eats into generation room. `prompt_overhead` is the
+    chat-template wrapper (BOS + role/turn markers + generation prompt) that raw
+    token counts miss — **measured once at load** on MLX, a small conservative
+    constant on llama (whose template we can't cheaply render to count).
+  - **Fits in one call** → single-shot with the structured prompt (unchanged path).
+  - **Otherwise map**: window the transcript greedily by segment line (a line is
+    atomic → aligns on chunk boundaries) to the budget, with a **2-line overlap**
+    carried into the next window so a point split across a seam appears whole in
+    one window (`NOTES_PROMPT` merges the duplicate). Condense each window to
+    terse notes (no length cap).
+  - **Recursive reduce**: if the notes fit one call → final structured pass. If
+    not → merge them in token-bounded batches (`NOTES_PROMPT`) and repeat. Levels
+    are ~`log_fanin(#windows)`, emergent from the budget, not a fixed count.
+  - **Termination** is guaranteed: every map/merge output ≤ `max_output` < budget,
+    so each level strictly shrinks the note count toward one. A progress guard
+    forces pairwise merges if a pathologically small context ever fails to shrink.
+- **Knobs**: `--n-ctx` (record + note) sets the llama-cpp context window for
+  bigger-GPU users; no-op on macOS (MLX context is auto-detected then capped).
+  Note mode stays single-shot (dictated notes are short).
 
 ## Phases
 1. **Capture + chunking**: two streams, WAV chunks, silence watchdog. Verify with a

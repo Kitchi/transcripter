@@ -57,6 +57,13 @@ def main() -> None:
         "on macOS, a GGUF file on Linux).",
     )
     rec.add_argument(
+        "--n-ctx",
+        type=int,
+        default=8192,
+        help="Summary model context window (llama-cpp/Linux only; ignored on macOS, "
+        "where MLX context is fixed by the model).",
+    )
+    rec.add_argument(
         "--no-summary",
         action="store_true",
         help="Skip the post-meeting summary.",
@@ -88,6 +95,12 @@ def main() -> None:
         type=Path,
         default=None,
         help="Summary model (platform default if unset).",
+    )
+    note.add_argument(
+        "--n-ctx",
+        type=int,
+        default=8192,
+        help="Summary model context window (llama-cpp/Linux only; ignored on macOS).",
     )
 
     args = parser.parse_args()
@@ -145,9 +158,9 @@ def main() -> None:
             from .summarizer import make_summarizer
 
             logging.info("summarizing...")
-            summarizer = make_summarizer(args.summary_model)
+            summarizer = make_summarizer(args.summary_model, n_ctx=args.n_ctx)
             try:
-                summary = summarizer.summarize(transcript_path.read_text())
+                summary = summarizer.summarize_meeting(transcript_path.read_text())
                 transcript_path.write_text(
                     summary + "\n\n---\n\n" + transcript_path.read_text()
                 )
@@ -224,7 +237,7 @@ def _run_note(args) -> None:
         return
 
     logging.info("summarizing note...")
-    summarizer = make_summarizer(args.summary_model)
+    summarizer = make_summarizer(args.summary_model, n_ctx=args.n_ctx)
     summary = summarizer.summarize(transcript_path.read_text(), prompt=NOTE_PROMPT)
     note_path.write_text(summary + "\n")
     shutil.rmtree(out, ignore_errors=True)
