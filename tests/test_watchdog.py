@@ -70,6 +70,21 @@ def test_activity_resets_silence_timer():
     assert w.update(0.01, 0.0, 0.25)
 
 
+def test_mic_only_ignores_system_channel():
+    # Note mode passes system_rms=None; activity is decided by the mic alone.
+    w = make()
+    while w.state is State.CALIBRATING:
+        assert not w.update(0.01, None, 0.25)
+    assert w.state is State.WAITING_FOR_SPEECH
+    assert not w.update(0.2, None, 0.25)  # mic speech arms it
+    assert w.state is State.ARMED
+    fired = 0.0
+    while not w.update(0.01, None, 0.25):
+        fired += 0.25
+        assert fired < 60
+    assert fired >= 45 - 0.25
+
+
 def test_zoom_muted_quiet_room_still_fires():
     # Mic carries ambient noise (Zoom mute is software-only); watchdog must
     # still fire on ambient-level input.

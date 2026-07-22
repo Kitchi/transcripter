@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -69,6 +70,9 @@ class _BaseStream:
             except queue.Empty:
                 break
         if not blocks:
+            # No new audio this poll: report silence, not a stale RMS. Otherwise a
+            # source that stops emitting during quiet keeps the watchdog armed.
+            self.last_rms = 0.0
             return np.empty(0, dtype=np.float32)
         data = np.concatenate(blocks).ravel()
         self.last_rms = rms(data)
@@ -120,10 +124,12 @@ class _TapStream(_BaseStream):
     """
 
     _ACCEPT_TIMEOUT = 20.0  # seconds to wait for the helper to connect
+    _HEADER_TIMEOUT = 5.0  # seconds to wait for the format header after connect
     _RECV_BYTES = 1 << 16
 
     def __init__(self, channel: str, cfg: Config):
         super().__init__(channel, cfg)
+        self._sock_dir: str | None = None
         self._sock_path: str | None = None
         self._listener: socket.socket | None = None
         self._conn: socket.socket | None = None
@@ -131,10 +137,15 @@ class _TapStream(_BaseStream):
         self._running = False
         self._src_rate = cfg.sample_rate
         self._channels = 2
+        # Streaming-resample state (carried across blocks; see _resample).
+        self._rs_tail = np.empty(0, dtype=np.float32)
+        self._rs_pos = 0.0
 
     def start(self) -> None:
-        # Keep the path short: sockaddr_un.sun_path is ~104 bytes.
-        self._sock_path = tempfile.mktemp(prefix="tap-", suffix=".sock", dir="/tmp")
+        # mkdtemp holds a private dir (no name-generation race like mktemp), and
+        # /tmp keeps sun_path short (~104 bytes) vs macOS's long default TMPDIR.
+        self._sock_dir = tempfile.mkdtemp(prefix="tap-", dir="/tmp")
+        self._sock_path = os.path.join(self._sock_dir, "s")
         self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._listener.bind(self._sock_path)
         self._listener.listen(1)
@@ -154,7 +165,11 @@ class _TapStream(_BaseStream):
                 "(grant System Audio Recording in System Settings > Privacy & Security)"
             ) from e
 
+        # Bound the header read so a connected-but-mute helper can't hang us;
+        # the read loop below wants a blocking socket, so clear it afterward.
+        self._conn.settimeout(self._HEADER_TIMEOUT)
         self._read_header()
+        self._conn.settimeout(None)
         self._running = True
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
@@ -169,7 +184,13 @@ class _TapStream(_BaseStream):
         return buf
 
     def _read_header(self) -> None:
-        line = self._recv_line().decode("utf-8", "replace").strip()
+        try:
+            line = self._recv_line().decode("utf-8", "replace").strip()
+        except TimeoutError as e:
+            raise RuntimeError(
+                f"system tap helper connected but sent no format header within "
+                f"{self._HEADER_TIMEOUT:.0f}s"
+            ) from e
         try:
             hdr = json.loads(line)
             self._src_rate = int(hdr["sampleRate"])
@@ -206,8 +227,32 @@ class _TapStream(_BaseStream):
             frames = np.frombuffer(usable, dtype=np.float32).reshape(-1, self._channels)
             mono = frames.mean(axis=1).astype(np.float32)
             if self._src_rate != self.cfg.sample_rate:
-                mono = _resample_mono(mono, self._src_rate, self.cfg.sample_rate)
-            self._push(mono)
+                mono = self._resample(mono)
+            if len(mono):
+                self._push(mono)
+
+    def _resample(self, x: np.ndarray) -> np.ndarray:
+        """Linear resample with phase carried across blocks (no per-block reset).
+
+        Only the read-loop thread touches the ``_rs_*`` state, so no locking is
+        needed. Output-sample positions advance on one continuous source-time
+        axis; retained tail samples let interpolation span block boundaries.
+        """
+        src, dst = self._src_rate, self.cfg.sample_rate
+        buf = np.concatenate([self._rs_tail, x]) if self._rs_tail.size else x
+        n = len(buf)
+        step = src / dst
+        # Emit outputs only where both interpolation neighbours exist (pos <= n-1).
+        pos = np.arange(self._rs_pos, n - 1 + 1e-9, step)
+        if pos.size == 0:
+            self._rs_tail = buf
+            return np.empty(0, dtype=np.float32)
+        out = np.interp(pos, np.arange(n), buf).astype(np.float32)
+        next_pos = pos[-1] + step
+        keep = min(int(np.floor(next_pos)), n)
+        self._rs_tail = buf[keep:].astype(np.float32)
+        self._rs_pos = next_pos - keep
+        return out
 
     def stop(self) -> None:
         self._running = False
@@ -220,18 +265,8 @@ class _TapStream(_BaseStream):
     def close(self) -> None:
         if self._listener:
             self._listener.close()
-        if self._sock_path and os.path.exists(self._sock_path):
-            os.unlink(self._sock_path)
-
-
-def _resample_mono(x: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
-    """Linear resample. Exact when src==dst; the tap defaults to the session rate."""
-    if src_rate == dst_rate or len(x) == 0:
-        return x
-    n_out = int(round(len(x) * dst_rate / src_rate))
-    src_t = np.arange(len(x))
-    dst_t = np.linspace(0, len(x) - 1, n_out)
-    return np.interp(dst_t, src_t, x).astype(np.float32)
+        if self._sock_dir and os.path.isdir(self._sock_dir):
+            shutil.rmtree(self._sock_dir, ignore_errors=True)
 
 
 def _make_stream(channel: str, device, cfg: Config) -> _BaseStream:
@@ -282,10 +317,13 @@ class CaptureSession:
         poll = 0.25
         last_status = time.monotonic()
         stop_reason = "interrupted"
-        for s in self.streams.values():
-            s.start()
-        log.info("recording (Ctrl-C to stop)")
         try:
+            # Inside the try so a failed start (e.g. tap permission/launch error)
+            # still runs the finally: any already-started stream is stopped and
+            # its socket/temp files are cleaned up.
+            for s in self.streams.values():
+                s.start()
+            log.info("recording (Ctrl-C to stop)")
             while True:
                 time.sleep(poll)
                 for channel, s in self.streams.items():

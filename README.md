@@ -34,6 +34,20 @@ Linux (CUDA or CPU).
 
 Both platforms need [uv](https://docs.astral.sh/uv/).
 
+`uv sync` (below) sets up a project-local env you drive with `uv run transcripter`.
+To instead install `transcripter` as a global command — runnable from anywhere,
+no `uv run` prefix:
+
+```sh
+uv tool install .          # from a checkout; or `uv tool install transcripter`
+transcripter record
+```
+
+The platform backends resolve automatically from the environment markers, and the
+bundled macOS tap helper ships with the package. On Linux, GPU still needs the
+build-time steps below (`uv tool install` won't set `CMAKE_ARGS` for you), so a
+CPU-only `uv tool install` is the clean path there.
+
 ### macOS
 
 Apple Silicon, **macOS 14.4+**. The MLX backends ship Metal-enabled wheels —
@@ -145,7 +159,12 @@ uv run pytest
 uv run ruff check .
 ```
 
-Rebuild the macOS system-audio tap helper after editing the Swift source:
+The macOS system-audio tap helper is a prebuilt, code-signed `.app` **checked
+into the repo** at `src/transcripter/_bin/SystemAudioTap.app` — so users without
+Xcode command-line tools can run without compiling. That committed binary is
+what actually runs; [`helper/build.sh`](helper/build.sh) regenerates it from the
+Swift source and is the source of truth for how it's built. The two can drift —
+after editing `helper/SystemAudioTap.swift`, rebuild and commit the result:
 
 ```sh
 helper/build.sh          # universal binary, code-signed -> src/transcripter/_bin/

@@ -84,7 +84,10 @@ def main() -> None:
     )
     note.add_argument("--model", default=None, help="Whisper model (platform default if unset).")
     note.add_argument(
-        "--summary-model", type=Path, default=None, help="Summary model (platform default if unset)."
+        "--summary-model",
+        type=Path,
+        default=None,
+        help="Summary model (platform default if unset).",
     )
 
     args = parser.parse_args()
@@ -113,13 +116,7 @@ def main() -> None:
     logging.info("system: %s", devices.describe(system))
     logging.info("session dir: %s", out)
 
-    # Route SIGTERM through the same graceful-stop path as Ctrl-C; also restore
-    # SIGINT in case we were launched as a background job (where it's ignored).
-    def _graceful_stop(signum, frame):
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGTERM, _graceful_stop)
-    signal.signal(signal.SIGINT, signal.default_int_handler)
+    _install_signal_handlers()
 
     session = capture.CaptureSession(cfg, devices={capture.MIC: mic, capture.SYSTEM: system})
 
@@ -285,7 +282,7 @@ def _concat_recording(dest, chunk_files, sample_rate) -> None:
 
 def _reconstruct_tracks(chunk_files, sample_rate, np, read_wav) -> dict:
     """Place each channel's overlapping chunks into one continuous track."""
-    placements: dict[str, list[tuple[int, "object"]]] = {}
+    placements: dict[str, list[tuple[int, object]]] = {}
     total = 0
     for cf in chunk_files:
         audio = read_wav(cf.path, target_rate=sample_rate)

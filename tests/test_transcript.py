@@ -34,6 +34,15 @@ def test_skips_empty_text():
     assert [s.text for s in b.segments] == ["ok"]
 
 
+def test_unlabeled_render_omits_speaker_tags():
+    b = TranscriptBuilder(overlap_seconds=2.0, label_speakers=False)
+    b.add_chunk("mic", 0, 0.0, [seg(1, 3, "a dictated note")])
+    out = b.render()
+    assert "**me**" not in out
+    assert "**them**" not in out
+    assert "`[0:01]` a dictated note" in out
+
+
 def test_render_timestamps():
     b = TranscriptBuilder(overlap_seconds=2.0)
     b.add_chunk("mic", 0, 0.0, [seg(75, 78, "minute mark")])
