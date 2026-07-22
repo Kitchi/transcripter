@@ -71,10 +71,38 @@ ephemeral.
 - Live speaker labels; any UI beyond tailing the MD file.
 
 ## Manual setup (one-time)
-1. Install BlackHole (2ch).
-2. Audio MIDI Setup → Multi-Output Device: physical output + BlackHole. Select it as
-   system output during meetings. (Volume: set on the physical device; Multi-Output
-   has no master volume.)
+- **macOS 14.4+**: none. System capture uses the bundled Core Audio process-tap
+  helper (read-only observer of the current output device). Original design used
+  BlackHole + a Multi-Output Device; that killed the hardware volume keys, which
+  is what the tap replaces. See "Pending work" above.
+- **Linux**: none. A PulseAudio/PipeWire `.monitor` source is found automatically.
+
+## Pending work
+
+### Core Audio process tap (macOS system capture without BlackHole)
+- macOS 14.4+ exposes non-invasive **process taps** (`AudioHardwareCreateProcessTap`
+  + private aggregate device). Observes the real output device read-only, so the
+  user keeps their normal output **and working hardware volume keys** — no BlackHole,
+  no Multi-Output.
+- Native helper in `helper/SystemAudioTap.swift`: writes a one-line JSON format
+  header to stderr, then raw interleaved **float32 / 48 kHz / stereo** PCM to stdout.
+  Built + self-signed via `helper/build.sh` → committed prebuilt at
+  `src/transcripter/_bin/system-audio-tap`.
+- Python side: `_TapStream` in `capture.py` spawns the helper, reads the header,
+  downmixes stereo→mono, and feeds the existing SYSTEM queue → chunker. Mic path
+  unchanged. Linux keeps the PulseAudio/PipeWire monitor path.
+- Distribution later: universal binary signed with a free self-signed cert (stable
+  TCC identity across rebuilds); paid Apple account only needed for notarization.
+
+### Summarizer: long-meeting context overflow
+- **Current design is single-shot**: the whole transcript is stuffed into one prompt
+  (`summarizer.py`). No chunking.
+- ~90 min of talk ≈ 13–18k tokens. macOS Gemma 3n E4B (~32k ctx) usually fits but
+  quality sags near the top; **Linux llama-cpp is pinned to `n_ctx=8192`** and
+  silently truncates from the front → long meetings lose everything but the tail.
+- Fix: **map-reduce / hierarchical summarization** — token-bounded windows (aligned
+  on existing chunk boundaries, light overlap), summarize each, then summarize the
+  summaries. Bounds context regardless of meeting length. Own change, after the tap.
 
 ## Phases
 1. **Capture + chunking**: two streams, WAV chunks, silence watchdog. Verify with a

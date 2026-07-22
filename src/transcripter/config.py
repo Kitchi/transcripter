@@ -19,7 +19,7 @@ class Config:
     # Absolute floor for the mic speech threshold, in case calibration
     # happens in a near-silent room.
     mic_rms_floor: float = 1e-3
-    # System (BlackHole) channel is digital silence when nothing plays;
+    # The system-audio channel is digital silence when nothing plays;
     # anything above this counts as active audio.
     system_rms_threshold: float = 5e-4
 

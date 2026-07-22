@@ -1,32 +1,40 @@
 """Audio device discovery."""
 
 import sys
+from pathlib import Path
 
 import sounddevice as sd
 
-BLACKHOLE_NAME = "BlackHole"
 MONITOR_SUFFIX = ".monitor"  # PulseAudio/PipeWire loopback of an output sink
+BLACKHOLE_NAME = "BlackHole"  # still guarded against as a stray default input
+
+# Sentinel returned by find_system_capture() on macOS: system audio is captured
+# via the bundled Core Audio process-tap helper, not a sounddevice input index.
+SYSTEM_TAP = "coreaudio-tap"
+
+# Bundled, code-signed universal binary built from helper/SystemAudioTap.swift.
+TAP_HELPER = Path(__file__).parent / "_bin" / "system-audio-tap"
 
 
 class DeviceError(RuntimeError):
     pass
 
 
-def find_system_capture() -> int:
-    """Return the sounddevice index of the system-audio capture device."""
+def find_system_capture() -> int | str:
+    """Return the system-audio capture source.
+
+    macOS: the SYSTEM_TAP sentinel (a non-invasive Core Audio tap on the current
+    output device -- no BlackHole, output and volume keys unaffected). Linux: the
+    sounddevice index of a PulseAudio/PipeWire monitor source.
+    """
     if sys.platform == "darwin":
-        return _find_blackhole()
+        if not TAP_HELPER.exists():
+            raise DeviceError(
+                f"System-audio tap helper missing: {TAP_HELPER}. "
+                "Build it with helper/build.sh."
+            )
+        return SYSTEM_TAP
     return _find_monitor()
-
-
-def _find_blackhole() -> int:
-    for i, dev in enumerate(sd.query_devices()):
-        if BLACKHOLE_NAME in dev["name"] and dev["max_input_channels"] > 0:
-            return i
-    raise DeviceError(
-        "BlackHole input device not found. Install it (brew install blackhole-2ch) "
-        "and route system output through a Multi-Output Device that includes it."
-    )
 
 
 def _find_monitor() -> int:
@@ -57,5 +65,7 @@ def default_mic() -> int:
     return idx
 
 
-def describe(idx: int) -> str:
-    return sd.query_devices(idx)["name"]
+def describe(source: int | str) -> str:
+    if source == SYSTEM_TAP:
+        return "Core Audio system tap"
+    return sd.query_devices(source)["name"]

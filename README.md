@@ -13,8 +13,8 @@ Linux (CUDA or CPU).
  default mic ──────┐
                    ├─→ 30s WAV chunks (2s overlap) ─→ whisper worker ─→ transcript.md
  system audio  ────┘         (deleted after use)            │
- (BlackHole / .monitor)                                     ▼ on stop
-                                                  local LLM summary prepended
+ (CoreAudio tap /                                           ▼ on stop
+  .monitor)                                       local LLM summary prepended
 ```
 
 ## Features
@@ -36,18 +36,23 @@ Both platforms need [uv](https://docs.astral.sh/uv/).
 
 ### macOS
 
-Apple Silicon. The MLX backends ship Metal-enabled wheels — nothing to compile.
+Apple Silicon, **macOS 14.4+**. The MLX backends ship Metal-enabled wheels —
+nothing to compile.
 
 ```sh
 uv sync
 ```
 
-One-time audio setup for system capture:
+**No audio setup needed.** System capture uses a non-invasive Core Audio
+*process tap* (a bundled, code-signed helper) that observes your current output
+device read-only. Your normal output and hardware volume keys keep working — no
+BlackHole, no Multi-Output Device. macOS prompts once for audio-recording
+permission on first run.
 
-1. Install [BlackHole 2ch](https://existential.audio/blackhole/).
-2. In **Audio MIDI Setup**, create a **Multi-Output Device** containing your
-   physical output + BlackHole, and select it as system output during meetings.
-   (Set volume on the physical device — Multi-Output has no master volume.)
+> Requires macOS 14.4+ (the process-tap API). The bundled helper is built from
+> [`helper/SystemAudioTap.swift`](helper/SystemAudioTap.swift); rebuild/sign it
+> with [`helper/build.sh`](helper/build.sh) (see that script's header for the
+> free self-signed-certificate setup).
 
 ### Linux
 
@@ -102,7 +107,7 @@ on top, timestamped `me`/`them` transcript below.
 ### Voice notes
 
 `note` mode is a mic-only variant for dictating a note to yourself. It captures
-**only** your mic (no BlackHole / system audio), transcribes it, and writes a
+**only** your mic (no system audio), transcribes it, and writes a
 single summarized note — the raw transcript is used to feed the summarizer and
 then discarded.
 
@@ -134,6 +139,12 @@ Stops on 45s of mic silence or `Ctrl-C`. Flags are the capture/model subset of
 ```sh
 uv run pytest
 uv run ruff check .
+```
+
+Rebuild the macOS system-audio tap helper after editing the Swift source:
+
+```sh
+helper/build.sh          # universal binary, code-signed -> src/transcripter/_bin/
 ```
 
 See [PLAN.md](PLAN.md) for architecture notes and roadmap.

@@ -39,6 +39,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/transcripter"]
+# The prebuilt Core Audio tap helper (macOS) is data, not a .py module; make sure
+# it ships in the wheel with its executable bit.
+artifacts = ["src/transcripter/_bin/*"]
 
 [tool.ruff]
 line-length = 100
