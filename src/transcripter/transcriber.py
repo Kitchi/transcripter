@@ -44,7 +44,13 @@ class MlxWhisperBackend:
             samples, path_or_hf_repo=self.model, condition_on_previous_text=False
         )
         return [
-            {"start": s["start"], "end": s["end"], "text": s["text"]}
+            {
+                "start": s["start"],
+                "end": s["end"],
+                "text": s["text"],
+                "no_speech_prob": s.get("no_speech_prob", 0.0),
+                "compression_ratio": s.get("compression_ratio", 0.0),
+            }
             for s in result["segments"]
         ]
 
@@ -71,4 +77,13 @@ class FasterWhisperBackend:
         segments, _info = self._get().transcribe(
             samples, vad_filter=True, condition_on_previous_text=False
         )
-        return [{"start": s.start, "end": s.end, "text": s.text} for s in segments]
+        return [
+            {
+                "start": s.start,
+                "end": s.end,
+                "text": s.text,
+                "no_speech_prob": getattr(s, "no_speech_prob", 0.0),
+                "compression_ratio": getattr(s, "compression_ratio", 0.0),
+            }
+            for s in segments
+        ]

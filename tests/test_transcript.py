@@ -47,3 +47,43 @@ def test_render_timestamps():
     b = TranscriptBuilder(overlap_seconds=2.0)
     b.add_chunk("mic", 0, 0.0, [seg(75, 78, "minute mark")])
     assert "`[1:15]`" in b.render()
+
+
+def test_drops_mic_bleed_of_system_audio():
+    # System audio leaks into the mic: same words, overlapping time. The mic
+    # copy is the echo and should be dropped.
+    b = TranscriptBuilder(overlap_seconds=2.0)
+    b.add_chunk("system", 0, 0.0, [seg(10, 13, "please hold the line")])
+    b.add_chunk("mic", 0, 0.0, [seg(10, 13, "Please hold the line.")])
+    out = b.render()
+    assert "**them**: please hold the line" in out
+    assert "**me**" not in out
+
+
+def test_keeps_mic_when_text_differs():
+    # Genuine talk-over: overlapping in time but different words -> keep both.
+    b = TranscriptBuilder(overlap_seconds=2.0)
+    b.add_chunk("system", 0, 0.0, [seg(10, 13, "please hold the line")])
+    b.add_chunk("mic", 0, 0.0, [seg(10, 13, "sorry, can you repeat that")])
+    out = b.render()
+    assert "**them**: please hold the line" in out
+    assert "**me**: sorry, can you repeat that" in out
+
+
+def test_keeps_mic_when_not_overlapping_in_time():
+    # Same words but disjoint in time: not an echo, keep both.
+    b = TranscriptBuilder(overlap_seconds=2.0)
+    b.add_chunk("system", 0, 0.0, [seg(10, 13, "thanks everyone")])
+    b.add_chunk("mic", 0, 0.0, [seg(40, 43, "thanks everyone")])
+    texts = [s.text for s in b._kept_segments()]
+    assert texts.count("thanks everyone") == 2
+
+
+def test_never_drops_system_segments():
+    # Direction is fixed: a system segment is never treated as a bleed of the mic.
+    b = TranscriptBuilder(overlap_seconds=2.0)
+    b.add_chunk("mic", 0, 0.0, [seg(10, 13, "good morning")])
+    b.add_chunk("system", 0, 0.0, [seg(10, 13, "good morning")])
+    kept = {(s.channel, s.text) for s in b._kept_segments()}
+    assert ("system", "good morning") in kept
+    assert ("mic", "good morning") not in kept

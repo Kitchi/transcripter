@@ -144,6 +144,8 @@ def main() -> None:
             overlap_seconds=cfg.overlap_seconds,
             keep_audio=args.keep_audio,
             rms_floor=cfg.transcribe_rms_floor,
+            no_speech_threshold=cfg.transcribe_no_speech_threshold,
+            compression_ratio_threshold=cfg.transcribe_compression_ratio_threshold,
         )
         worker.start()
         session.on_chunk = worker.enqueue
@@ -218,6 +220,8 @@ def _run_note(args) -> None:
         out_path=transcript_path,
         overlap_seconds=cfg.overlap_seconds,
         rms_floor=cfg.transcribe_rms_floor,
+        no_speech_threshold=cfg.transcribe_no_speech_threshold,
+        compression_ratio_threshold=cfg.transcribe_compression_ratio_threshold,
         label_speakers=False,
     )
     worker.start()

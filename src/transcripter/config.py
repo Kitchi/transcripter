@@ -29,6 +29,11 @@ class Config:
     # Chunks below this RMS are skipped before transcription: Whisper
     # hallucinates high-prior phrases ("Thank you") on silence.
     transcribe_rms_floor: float = 1e-3
+    # Post-transcription hallucination filter (see filters.py). Segments with a
+    # window no_speech_prob above this are dropped (silence fillers)...
+    transcribe_no_speech_threshold: float = 0.6
+    # ...and those with a compression_ratio above this (repetition loops).
+    transcribe_compression_ratio_threshold: float = 2.4
 
     @property
     def chunk_samples(self) -> int:

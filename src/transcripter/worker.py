@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from .capture import ChunkFile, rms
+from .filters import drop_hallucinations
 from .transcriber import Backend
 from .transcript import TranscriptBuilder
 from .wavio import read_wav
@@ -24,12 +25,16 @@ class TranscriptionWorker:
         overlap_seconds: float,
         keep_audio: bool = False,
         rms_floor: float = 0.0,
+        no_speech_threshold: float = 0.6,
+        compression_ratio_threshold: float = 2.4,
         label_speakers: bool = True,
     ):
         self.backend = backend
         self.out_path = out_path
         self.keep_audio = keep_audio
         self.rms_floor = rms_floor
+        self.no_speech_threshold = no_speech_threshold
+        self.compression_ratio_threshold = compression_ratio_threshold
         self.builder = TranscriptBuilder(
             overlap_seconds=overlap_seconds, label_speakers=label_speakers
         )
@@ -73,14 +78,20 @@ class TranscriptionWorker:
                 if not self.keep_audio:
                     chunk.path.unlink(missing_ok=True)
                 return
-        segments = self.backend.transcribe(chunk.path)
+        raw = self.backend.transcribe(chunk.path)
+        segments = drop_hallucinations(
+            raw,
+            no_speech_threshold=self.no_speech_threshold,
+            compression_ratio_threshold=self.compression_ratio_threshold,
+        )
         self.builder.add_chunk(chunk.channel, chunk.index, chunk.start_seconds, segments)
         self.out_path.write_text(self.builder.render())
         if not self.keep_audio:
             chunk.path.unlink(missing_ok=True)
         log.info(
-            "transcribed %s: %d segment(s) in %.1fs",
+            "transcribed %s: %d segment(s) (%d dropped) in %.1fs",
             chunk.path.name,
             len(segments),
+            len(raw) - len(segments),
             time.monotonic() - t0,
         )
