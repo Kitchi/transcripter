@@ -12,8 +12,12 @@ BLACKHOLE_NAME = "BlackHole"  # still guarded against as a stray default input
 # via the bundled Core Audio process-tap helper, not a sounddevice input index.
 SYSTEM_TAP = "coreaudio-tap"
 
-# Bundled, code-signed universal binary built from helper/SystemAudioTap.swift.
-TAP_HELPER = Path(__file__).parent / "_bin" / "system-audio-tap"
+# Bundled, code-signed helper built from helper/ by helper/build.sh. It must be
+# a .app bundle (not a bare binary): the Info.plist + signature are what let
+# macOS hold the system-audio-recording permission -- an unbundled binary
+# silently receives zeroed audio. We spawn the executable inside the bundle.
+TAP_APP = Path(__file__).parent / "_bin" / "SystemAudioTap.app"
+TAP_HELPER = TAP_APP / "Contents" / "MacOS" / "system-audio-tap"
 
 
 class DeviceError(RuntimeError):

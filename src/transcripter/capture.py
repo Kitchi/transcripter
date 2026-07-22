@@ -10,8 +10,11 @@ macOS (see `_TapStream`).
 
 import json
 import logging
+import os
 import queue
+import socket
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -22,7 +25,7 @@ import sounddevice as sd
 
 from .chunker import Chunk, OverlappingChunker
 from .config import Config
-from .devices import SYSTEM_TAP, TAP_HELPER
+from .devices import SYSTEM_TAP, TAP_APP
 from .watchdog import SilenceWatchdog, State
 from .wavio import write_wav
 
@@ -105,47 +108,73 @@ class _DeviceStream(_BaseStream):
 
 
 class _TapStream(_BaseStream):
-    """macOS system audio via the Core Audio tap helper subprocess.
+    """macOS system audio via the Core Audio tap helper app.
 
-    The helper writes a one-line JSON format header to stderr, then raw
-    interleaved float32 PCM to stdout. We stereo-downmix to mono, resample to the
-    session rate if the tap's rate differs, and push blocks like any other source.
+    The helper must run as its own TCC-responsible process to hold the
+    system-audio-recording permission, so we launch it through LaunchServices
+    (`open`) rather than spawning the binary directly -- a direct child inherits
+    the terminal's identity and the tap silently yields zeroed audio. Because
+    `open` detaches stdio, the helper connects back to a unix-domain socket we
+    listen on: one JSON header line, then interleaved float32 PCM. We downmix to
+    mono, resample if the tap's rate differs, and push blocks like any source.
     """
 
-    # ~50 ms of audio per read at 48 kHz stereo; small for low latency.
-    _READ_FRAMES = 2400
+    _ACCEPT_TIMEOUT = 20.0  # seconds to wait for the helper to connect
+    _RECV_BYTES = 1 << 16
 
     def __init__(self, channel: str, cfg: Config):
         super().__init__(channel, cfg)
-        self._proc: subprocess.Popen | None = None
+        self._sock_path: str | None = None
+        self._listener: socket.socket | None = None
+        self._conn: socket.socket | None = None
         self._reader: threading.Thread | None = None
-        self._stderr_pump: threading.Thread | None = None
         self._running = False
         self._src_rate = cfg.sample_rate
         self._channels = 2
 
     def start(self) -> None:
-        self._proc = subprocess.Popen(
-            [str(TAP_HELPER)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0,
+        # Keep the path short: sockaddr_un.sun_path is ~104 bytes.
+        self._sock_path = tempfile.mktemp(prefix="tap-", suffix=".sock", dir="/tmp")
+        self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._listener.bind(self._sock_path)
+        self._listener.listen(1)
+        self._listener.settimeout(self._ACCEPT_TIMEOUT)
+
+        # `open -n`: new instance, launched by LaunchServices as its own
+        # responsible process. Returns immediately; the app connects back.
+        subprocess.run(
+            ["/usr/bin/open", "-n", str(TAP_APP), "--args", self._sock_path],
+            check=True,
         )
+        try:
+            self._conn, _ = self._listener.accept()
+        except TimeoutError as e:
+            raise RuntimeError(
+                "system tap helper did not connect -- launch or permission failure "
+                "(grant System Audio Recording in System Settings > Privacy & Security)"
+            ) from e
+
         self._read_header()
         self._running = True
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
-        self._stderr_pump = threading.Thread(target=self._drain_stderr, daemon=True)
-        self._stderr_pump.start()
+
+    def _recv_line(self) -> bytes:
+        buf = b""
+        while b"\n" not in buf:
+            b = self._conn.recv(1)
+            if not b:
+                break
+            buf += b
+        return buf
 
     def _read_header(self) -> None:
-        line = self._proc.stderr.readline().decode("utf-8", "replace").strip()
+        line = self._recv_line().decode("utf-8", "replace").strip()
         try:
             hdr = json.loads(line)
             self._src_rate = int(hdr["sampleRate"])
             self._channels = int(hdr["channels"])
         except (json.JSONDecodeError, KeyError, ValueError) as e:
-            self._proc.terminate()
             raise RuntimeError(
                 f"system tap helper did not report a valid format header: {line!r}"
             ) from e
@@ -159,11 +188,12 @@ class _TapStream(_BaseStream):
 
     def _read_loop(self) -> None:
         frame_bytes = self._channels * 4  # float32
-        chunk_bytes = self._READ_FRAMES * frame_bytes
         leftover = b""
-        stdout = self._proc.stdout
         while self._running:
-            data = stdout.read(chunk_bytes)
+            try:
+                data = self._conn.recv(self._RECV_BYTES)
+            except OSError:
+                break
             if not data:
                 break
             buf = leftover + data
@@ -179,29 +209,19 @@ class _TapStream(_BaseStream):
                 mono = _resample_mono(mono, self._src_rate, self.cfg.sample_rate)
             self._push(mono)
 
-    def _drain_stderr(self) -> None:
-        # Keep the helper's stderr from filling; surface anything it emits.
-        for raw in iter(self._proc.stderr.readline, b""):
-            msg = raw.decode("utf-8", "replace").strip()
-            if msg:
-                log.warning("system tap helper: %s", msg)
-
     def stop(self) -> None:
         self._running = False
-        if self._proc and self._proc.poll() is None:
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
+        # Closing our end makes the helper's next send() fail, so it exits.
+        if self._conn:
+            self._conn.close()
         if self._reader:
             self._reader.join(timeout=2)
 
     def close(self) -> None:
-        if self._proc:
-            for pipe in (self._proc.stdout, self._proc.stderr):
-                if pipe:
-                    pipe.close()
+        if self._listener:
+            self._listener.close()
+        if self._sock_path and os.path.exists(self._sock_path):
+            os.unlink(self._sock_path)
 
 
 def _resample_mono(x: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:

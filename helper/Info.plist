@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>system-audio-tap</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.transcripter.system-audio-tap</string>
+    <key>CFBundleName</key>
+    <string>Transcripter System Audio Tap</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.4</string>
+    <!-- Agent (no Dock icon) rather than LSBackgroundOnly: a pure background-only
+         app has no GUI connection, which suppresses the TCC permission prompt. -->
+    <key>LSUIElement</key>
+    <true/>
+    <!-- Required for the system-audio-recording TCC grant to be requestable and
+         to list this helper under Privacy & Security. -->
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Transcripter captures system audio to transcribe your meetings locally.</string>
+</dict>
+</plist>

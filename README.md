@@ -44,10 +44,14 @@ uv sync
 ```
 
 **No audio setup needed.** System capture uses a non-invasive Core Audio
-*process tap* (a bundled, code-signed helper) that observes your current output
-device read-only. Your normal output and hardware volume keys keep working — no
-BlackHole, no Multi-Output Device. macOS prompts once for audio-recording
-permission on first run.
+*process tap* (a bundled, code-signed helper app) that observes your current
+output device read-only. Your normal output and hardware volume keys keep
+working — no BlackHole, no Multi-Output Device.
+
+On first run, macOS shows a **"…would like to record this computer's audio"**
+prompt — approve it (or enable *Transcripter System Audio Tap* under **System
+Settings → Privacy & Security → Screen & System Audio Recording**). Until it's
+granted, the system channel records silence.
 
 > Requires macOS 14.4+ (the process-tap API). The bundled helper is built from
 > [`helper/SystemAudioTap.swift`](helper/SystemAudioTap.swift); rebuild/sign it

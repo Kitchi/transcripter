@@ -84,15 +84,25 @@ ephemeral.
   + private aggregate device). Observes the real output device read-only, so the
   user keeps their normal output **and working hardware volume keys** — no BlackHole,
   no Multi-Output.
-- Native helper in `helper/SystemAudioTap.swift`: writes a one-line JSON format
-  header to stderr, then raw interleaved **float32 / 48 kHz / stereo** PCM to stdout.
-  Built + self-signed via `helper/build.sh` → committed prebuilt at
-  `src/transcripter/_bin/system-audio-tap`.
-- Python side: `_TapStream` in `capture.py` spawns the helper, reads the header,
-  downmixes stereo→mono, and feeds the existing SYSTEM queue → chunker. Mic path
-  unchanged. Linux keeps the PulseAudio/PipeWire monitor path.
-- Distribution later: universal binary signed with a free self-signed cert (stable
-  TCC identity across rebuilds); paid Apple account only needed for notarization.
+- **TCC attribution is the crux.** The helper must be its own *responsible*
+  process, or macOS attributes the system-audio-recording request to the spawning
+  terminal and the tap silently delivers **zeroed** audio (no error, no prompt).
+  - The `responsibility_spawnattr_setdisclaim` SPI (the usual disclaim trick) is
+    **gone on macOS 26** — not exported by any dylib. Dead end.
+  - Working approach: launch the helper via **LaunchServices (`open -n`)**, which
+    makes it its own responsible process. It also needs a `.app` bundle with an
+    `NSAudioCaptureUsageDescription` (`helper/Info.plist`) and `LSUIElement`
+    (a pure `LSBackgroundOnly` app can't present the prompt).
+- Since `open` detaches stdio, the helper connects back to a **unix-domain socket**
+  the Python side listens on: one JSON header line (`float32 / 48 kHz / stereo`),
+  then interleaved PCM. `helper/SystemAudioTap.swift`, bundled at
+  `src/transcripter/_bin/SystemAudioTap.app`, built/signed by `helper/build.sh`.
+- Python side: `_TapStream` in `capture.py` binds a socket, `open`s the app,
+  accepts the connection, downmixes stereo→mono, feeds the SYSTEM queue → chunker.
+  Mic path unchanged. Linux keeps the PulseAudio/PipeWire monitor path.
+- Signing: a free self-signed cert gives a stable TCC identity across rebuilds
+  (ad-hoc `-` works but re-prompts each rebuild). Paid Apple account only needed
+  for notarization / distribution to other Macs.
 
 ### Summarizer: long-meeting context overflow
 - **Current design is single-shot**: the whole transcript is stuffed into one prompt
