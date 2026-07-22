@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -296,6 +297,9 @@ class CaptureSession:
         )
         self.chunk_files: list[ChunkFile] = []
         self.on_chunk = None  # optional callback(ChunkFile), set by later phases
+        # Wall-clock recording bounds, set by run(); None until it starts.
+        self.started_at: datetime | None = None
+        self.ended_at: datetime | None = None
 
     def _write_chunk(self, channel: str, chunk: Chunk) -> None:
         path = self.chunk_dir / f"{channel}-{chunk.index:04d}.wav"
@@ -323,6 +327,7 @@ class CaptureSession:
             # its socket/temp files are cleaned up.
             for s in self.streams.values():
                 s.start()
+            self.started_at = datetime.now()
             log.info("recording (Ctrl-C to stop)")
             while True:
                 time.sleep(poll)
@@ -350,6 +355,7 @@ class CaptureSession:
         except KeyboardInterrupt:
             log.info("stopped by user")
         finally:
+            self.ended_at = datetime.now()
             for channel, s in self.streams.items():
                 s.stop()
                 s.close()

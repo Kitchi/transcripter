@@ -1,7 +1,7 @@
 import argparse
 import logging
 import signal
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import capture, devices
@@ -168,10 +168,41 @@ def main() -> None:
                 )
             except Exception:
                 logging.exception("summarization failed; transcript left as-is")
+        if session.started_at and session.ended_at:
+            header = _session_header(session.started_at, session.ended_at)
+            transcript_path.write_text(header + transcript_path.read_text())
         final_path = _flatten_session(
             out, transcript_path, session.chunk_files, cfg.sample_rate, args.keep_audio
         )
         logging.info("transcript: %s", final_path)
+
+
+def _fmt_duration(delta: timedelta) -> str:
+    """Human-readable meeting length, e.g. "48m" or "1h 5m"."""
+    total = max(int(delta.total_seconds()), 0)
+    h, rem = divmod(total, 3600)
+    m = rem // 60
+    if h and m:
+        return f"{h}h {m}m"
+    if h:
+        return f"{h}h"
+    return f"{m}m"
+
+
+def _session_header(started: datetime, ended: datetime) -> str:
+    """Metadata block (start/end/duration) prepended above the notes.
+
+    Hard line breaks (trailing two spaces) keep the three fields on their own
+    lines in rendered markdown; a trailing blank line separates it from the
+    summary that follows.
+    """
+    fmt = "%Y-%m-%d %H:%M"
+    lines = [
+        f"**Started:** {started.strftime(fmt)}",
+        f"**Ended:** {ended.strftime(fmt)}",
+        f"**Duration:** {_fmt_duration(ended - started)}",
+    ]
+    return "  \n".join(lines) + "\n\n"
 
 
 def _session_dir(args, default_leaf: str) -> Path:
