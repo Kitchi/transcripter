@@ -7,6 +7,14 @@ requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26",
     "sounddevice>=0.4.6",
+    # Speaker diarization: pyannote's segmentation net + a WeSpeaker embedding
+    # model, run through onnxruntime. No HuggingFace gate and no torch.
+    "sherpa-onnx>=1.13.4",
+    # sherpa-onnx's platform wheels ship only the extension module; the
+    # onnxruntime dylibs live in this companion package. sherpa-onnx declares it
+    # in its wheel metadata, but uv resolves from the sdist and misses it,
+    # producing an install that imports with a dlopen error. Pin it explicitly.
+    "sherpa-onnx-core>=1.13.4",
     # macOS: Metal-accelerated via Apple's MLX (prebuilt wheels).
     "mlx-whisper>=0.4 ; sys_platform == 'darwin'",
     "mlx-lm>=0.31.3 ; sys_platform == 'darwin'",
