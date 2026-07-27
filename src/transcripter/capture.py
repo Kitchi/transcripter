@@ -1,7 +1,9 @@
-"""Two-stream capture: default mic + system audio -> overlapping WAV chunks per channel.
+"""Two-stream capture: default mic + system audio -> one interleaved WAV.
 
 Each stream has its own source pushing blocks onto a queue; the session loop
-drains both, feeds the chunkers and the silence watchdog, and writes chunk WAVs.
+drains both, feeds the recorder and the silence watchdog. Transcription,
+echo cancellation and diarization are offline passes over the finished
+recording (see `pipeline.py`), so capture stays as simple as possible.
 
 The mic is always a sounddevice input. System audio is a sounddevice input on
 Linux (a PulseAudio/PipeWire monitor) and the bundled Core Audio tap helper on
@@ -18,31 +20,22 @@ import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 
-from .chunker import Chunk, OverlappingChunker
 from .config import Config
 from .devices import SYSTEM_TAP, TAP_APP
+from .recorder import Recorder
 from .watchdog import SilenceWatchdog, State
-from .wavio import write_wav
 
 log = logging.getLogger(__name__)
 
 MIC = "mic"
 SYSTEM = "system"
 
-
-@dataclass(frozen=True)
-class ChunkFile:
-    channel: str  # MIC or SYSTEM
-    index: int
-    start_seconds: float
-    path: Path
+RECORDING_NAME = "recording.wav"
 
 
 def rms(samples: np.ndarray) -> float:
@@ -56,7 +49,6 @@ class _BaseStream:
         self.channel = channel
         self.cfg = cfg
         self.queue: queue.Queue[np.ndarray] = queue.Queue()
-        self.chunker = OverlappingChunker(cfg.chunk_samples, cfg.hop_samples)
         self.last_rms = 0.0
 
     def _push(self, block: np.ndarray) -> None:
@@ -285,8 +277,10 @@ class CaptureSession:
         watchdog then decides activity from the mic alone.
         """
         self.cfg = cfg
-        self.chunk_dir = cfg.out_dir / "chunks"
-        self.chunk_dir.mkdir(parents=True, exist_ok=True)
+        # MIC first so it lands on the left channel, SYSTEM on the right -- the
+        # near/far convention the echo canceller assumes.
+        self.channels = [ch for ch in (MIC, SYSTEM) if ch in devices]
+        self.recording_path = cfg.out_dir / RECORDING_NAME
         self.streams = {ch: _make_stream(ch, dev, cfg) for ch, dev in devices.items()}
         self.watchdog = SilenceWatchdog(
             silence_stop_seconds=cfg.silence_stop_seconds,
@@ -295,25 +289,10 @@ class CaptureSession:
             mic_rms_floor=cfg.mic_rms_floor,
             system_rms_threshold=cfg.system_rms_threshold,
         )
-        self.chunk_files: list[ChunkFile] = []
-        self.on_chunk = None  # optional callback(ChunkFile), set by later phases
+        self.duration_seconds = 0.0
         # Wall-clock recording bounds, set by run(); None until it starts.
         self.started_at: datetime | None = None
         self.ended_at: datetime | None = None
-
-    def _write_chunk(self, channel: str, chunk: Chunk) -> None:
-        path = self.chunk_dir / f"{channel}-{chunk.index:04d}.wav"
-        write_wav(path, chunk.samples, self.cfg.sample_rate)
-        cf = ChunkFile(
-            channel=channel,
-            index=chunk.index,
-            start_seconds=chunk.start_sample / self.cfg.sample_rate,
-            path=path,
-        )
-        self.chunk_files.append(cf)
-        log.info("wrote %s", path.name)
-        if self.on_chunk:
-            self.on_chunk(cf)
 
     def run(self) -> str:
         """Record until Ctrl-C or silence watchdog fires. Returns the stop reason."""
@@ -321,6 +300,7 @@ class CaptureSession:
         poll = 0.25
         last_status = time.monotonic()
         stop_reason = "interrupted"
+        recorder = Recorder(self.recording_path, self.channels, cfg.sample_rate)
         try:
             # Inside the try so a failed start (e.g. tap permission/launch error)
             # still runs the finally: any already-started stream is stopped and
@@ -331,10 +311,7 @@ class CaptureSession:
             log.info("recording (Ctrl-C to stop)")
             while True:
                 time.sleep(poll)
-                for channel, s in self.streams.items():
-                    data = s.drain()
-                    for chunk in s.chunker.push(data):
-                        self._write_chunk(channel, chunk)
+                recorder.write({ch: s.drain() for ch, s in self.streams.items()})
                 sys_stream = self.streams.get(SYSTEM)
                 sys_rms = sys_stream.last_rms if sys_stream else None
                 if self.watchdog.update(self.streams[MIC].last_rms, sys_rms, poll):
@@ -356,10 +333,10 @@ class CaptureSession:
             log.info("stopped by user")
         finally:
             self.ended_at = datetime.now()
-            for channel, s in self.streams.items():
+            for s in self.streams.values():
                 s.stop()
                 s.close()
-                final = s.chunker.flush()
-                if final is not None:
-                    self._write_chunk(channel, final)
+            # Drain whatever the streams buffered between the last poll and stop.
+            recorder.write({ch: s.drain() for ch, s in self.streams.items()})
+            self.duration_seconds = recorder.close()
         return stop_reason

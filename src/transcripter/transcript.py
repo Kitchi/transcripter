@@ -1,12 +1,14 @@
-"""Pure transcript assembly: overlap dedup, channel interleave, markdown rendering."""
+"""Pure transcript assembly: channel interleave, bleed dedup, markdown rendering."""
 
 import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
-CHANNEL_LABELS = {"mic": "me", "system": "them"}
 MIC = "mic"
 SYSTEM = "system"
+
+ME_LABEL = "me"
+THEM_LABEL = "them"
 
 _PUNCT = re.compile(r"[^\w\s]")
 
@@ -25,42 +27,37 @@ class Segment:
     start: float  # seconds from session start
     end: float
     text: str
+    speaker: str | None = None  # diarized label; system channel only
+
+    @property
+    def label(self) -> str:
+        if self.channel == MIC:
+            return ME_LABEL
+        return self.speaker or THEM_LABEL
 
 
 @dataclass
-class TranscriptBuilder:
-    overlap_seconds: float
-    label_speakers: bool = True  # False for single-voice notes: no me/them tags
+class Transcript:
+    """Segments from both channels, rendered to markdown in timestamp order."""
+
+    label_speakers: bool = True  # False for single-voice notes: no speaker tags
     # Min normalized-text similarity for a mic segment to count as system bleed.
     cross_channel_text_ratio: float = 0.6
     segments: list[Segment] = field(default_factory=list)
 
-    def add_chunk(
-        self,
-        channel: str,
-        chunk_index: int,
-        chunk_start_seconds: float,
-        raw_segments: list[dict],
-    ) -> None:
-        """Add one transcribed chunk. `raw_segments` have chunk-local start/end/text.
-
-        Segments whose midpoint falls in the leading overlap region were already
-        covered by the previous chunk and are dropped (except for chunk 0, which
-        has no predecessor).
-        """
+    def add(self, channel: str, raw_segments: list[dict]) -> None:
+        """Add a channel's transcribed segments; start/end are session-absolute."""
         for seg in raw_segments:
             text = seg["text"].strip()
             if not text:
                 continue
-            midpoint = (seg["start"] + seg["end"]) / 2
-            if chunk_index > 0 and midpoint < self.overlap_seconds:
-                continue
             self.segments.append(
                 Segment(
                     channel=channel,
-                    start=chunk_start_seconds + seg["start"],
-                    end=chunk_start_seconds + seg["end"],
+                    start=seg["start"],
+                    end=seg["end"],
                     text=text,
+                    speaker=seg.get("speaker"),
                 )
             )
 
@@ -69,7 +66,9 @@ class TranscriptBuilder:
 
         Bleed is one-directional: system audio leaves the speakers and re-enters
         the mic, so a mic segment can shadow a system one but never the reverse.
-        The mic copy is therefore always the echo to drop.
+        The mic copy is therefore always the echo to drop. This is a net for
+        residual echo the canceller did not fully remove -- with AEC upstream it
+        should fire rarely.
         """
         system = [s for s in self.segments if s.channel == SYSTEM]
         return [
@@ -93,8 +92,7 @@ class TranscriptBuilder:
         lines = ["# Transcript", ""]
         for seg in sorted(self._kept_segments(), key=lambda s: (s.start, s.channel)):
             if self.label_speakers:
-                label = CHANNEL_LABELS.get(seg.channel, seg.channel)
-                lines.append(f"`[{_fmt(seg.start)}]` **{label}**: {seg.text}")
+                lines.append(f"`[{_fmt(seg.start)}]` **{seg.label}**: {seg.text}")
             else:
                 lines.append(f"`[{_fmt(seg.start)}]` {seg.text}")
             lines.append("")

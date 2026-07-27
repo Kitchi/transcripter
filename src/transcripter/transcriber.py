@@ -6,18 +6,21 @@ Selected by platform (see `make_backend`):
 """
 
 import sys
-from pathlib import Path
 from typing import Protocol
 
-from .wavio import read_wav
+import numpy as np
 
 MLX_DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 FASTER_DEFAULT_MODEL = "large-v3-turbo"
 
 
 class Backend(Protocol):
-    def transcribe(self, path: Path) -> list[dict]:
-        """Return segments as dicts with 'start', 'end', 'text' (chunk-local seconds)."""
+    def transcribe(self, samples: np.ndarray) -> list[dict]:
+        """Transcribe mono 16 kHz float32 audio.
+
+        Returns segments as dicts with 'start', 'end', 'text' in seconds from
+        the start of `samples`.
+        """
         ...
 
 
@@ -32,14 +35,13 @@ class MlxWhisperBackend:
     def __init__(self, model: str = "mlx-community/whisper-large-v3-turbo"):
         self.model = model
 
-    def transcribe(self, path: Path) -> list[dict]:
+    def transcribe(self, samples: np.ndarray) -> list[dict]:
         import mlx_whisper  # deferred: heavy import, loads Metal
 
-        # Pass samples directly; mlx_whisper's file loader shells out to ffmpeg,
-        # which we don't want to depend on.
-        samples = read_wav(path)
-        # condition_on_previous_text=False: stop a hallucinated phrase in one
-        # chunk from seeding the next.
+        # Samples go in directly; mlx_whisper's file loader shells out to
+        # ffmpeg, which we don't want to depend on.
+        # condition_on_previous_text=False: stop a hallucinated phrase from
+        # seeding the rest of the decode.
         result = mlx_whisper.transcribe(
             samples, path_or_hf_repo=self.model, condition_on_previous_text=False
         )
@@ -68,12 +70,11 @@ class FasterWhisperBackend:
             self._loaded = WhisperModel(self.model, device="auto", compute_type="auto")
         return self._loaded
 
-    def transcribe(self, path: Path) -> list[dict]:
-        # read_wav yields 16 kHz mono float32, which faster-whisper consumes
-        # directly (no PyAV/ffmpeg decode needed).
-        samples = read_wav(path)
+    def transcribe(self, samples: np.ndarray) -> list[dict]:
+        # faster-whisper consumes 16 kHz mono float32 directly (no PyAV/ffmpeg
+        # decode needed).
         # vad_filter drops non-speech; condition_on_previous_text=False keeps a
-        # hallucination from seeding later chunks.
+        # hallucination from seeding the rest of the decode.
         segments, _info = self._get().transcribe(
             samples, vad_filter=True, condition_on_previous_text=False
         )

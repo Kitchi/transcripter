@@ -30,8 +30,6 @@ def main() -> None:
         default=None,
         help="Recording name, prefixed to the timestamp (e.g. standup-20260720-143000).",
     )
-    rec.add_argument("--chunk-seconds", type=float, default=30.0)
-    rec.add_argument("--overlap-seconds", type=float, default=2.0)
     rec.add_argument(
         "--silence-stop-seconds",
         type=float,
@@ -47,7 +45,7 @@ def main() -> None:
     rec.add_argument(
         "--no-transcribe",
         action="store_true",
-        help="Capture only; keep chunk WAVs, skip transcription.",
+        help="Capture only; keep recording.wav, skip all processing.",
     )
     rec.add_argument(
         "--summary-model",
@@ -71,7 +69,37 @@ def main() -> None:
     rec.add_argument(
         "--keep-audio",
         action="store_true",
-        help="Retain chunk WAVs after transcription (default: delete).",
+        help="Retain recording.wav after processing (default: delete).",
+    )
+    rec.add_argument(
+        "--no-aec",
+        action="store_true",
+        help="Skip echo cancellation on the mic channel.",
+    )
+    rec.add_argument(
+        "--aec-dtd-ratio",
+        type=float,
+        default=Config.aec_dtd_ratio,
+        help="Echo canceller adapts only when mic power is below this fraction of "
+        "system power. Raise it if the log reports 0.0 dB ERLE with audible far-end "
+        "speech (loud speakers couple more echo into the mic).",
+    )
+    rec.add_argument(
+        "--no-diarize",
+        action="store_true",
+        help="Skip speaker diarization; the far end stays a single 'them'.",
+    )
+    rec.add_argument(
+        "--diarize-threshold",
+        type=float,
+        default=Config.diarize_threshold,
+        help="Speaker clustering threshold; lower splits into more speakers.",
+    )
+    rec.add_argument(
+        "--speakers",
+        type=int,
+        default=-1,
+        help="Known number of far-end speakers (default: detect automatically).",
     )
 
     note = sub.add_parser(
@@ -81,8 +109,6 @@ def main() -> None:
     note.add_argument("--out", type=Path, default=None, help="Full session directory path.")
     note.add_argument("--sessions-dir", type=Path, default=Path.cwd())
     note.add_argument("--name", default=None, help="Note name, prefixed to the date.")
-    note.add_argument("--chunk-seconds", type=float, default=30.0)
-    note.add_argument("--overlap-seconds", type=float, default=2.0)
     note.add_argument(
         "--silence-stop-seconds",
         type=float,
@@ -118,9 +144,10 @@ def main() -> None:
         out = args.sessions_dir / leaf
     cfg = Config(
         out_dir=out,
-        chunk_seconds=args.chunk_seconds,
-        overlap_seconds=args.overlap_seconds,
         silence_stop_seconds=args.silence_stop_seconds or float("inf"),
+        aec_dtd_ratio=args.aec_dtd_ratio,
+        diarize_threshold=args.diarize_threshold,
+        diarize_num_speakers=args.speakers,
     )
 
     mic = devices.default_mic()
@@ -133,48 +160,42 @@ def main() -> None:
 
     session = capture.CaptureSession(cfg, devices={capture.MIC: mic, capture.SYSTEM: system})
 
-    worker = None
-    if not args.no_transcribe:
-        from .transcriber import make_backend
-        from .worker import TranscriptionWorker
-
-        worker = TranscriptionWorker(
-            backend=make_backend(args.model),
-            out_path=out / "transcript.md",
-            overlap_seconds=cfg.overlap_seconds,
-            keep_audio=args.keep_audio,
-            rms_floor=cfg.transcribe_rms_floor,
-            no_speech_threshold=cfg.transcribe_no_speech_threshold,
-            compression_ratio_threshold=cfg.transcribe_compression_ratio_threshold,
-        )
-        worker.start()
-        session.on_chunk = worker.enqueue
-
     reason = session.run()
-    logging.info("session ended (%s): %d chunks", reason, len(session.chunk_files))
-    if worker is not None:
-        logging.info("waiting for transcription to finish...")
-        worker.finish()
-        transcript_path = out / "transcript.md"
-        if not args.no_summary and worker.builder.segments:
-            from .summarizer import make_summarizer
+    logging.info("session ended (%s): %.0fs recorded", reason, session.duration_seconds)
 
-            logging.info("summarizing...")
-            summarizer = make_summarizer(args.summary_model, n_ctx=args.n_ctx)
-            try:
-                summary = summarizer.summarize_meeting(transcript_path.read_text())
-                transcript_path.write_text(
-                    summary + "\n\n---\n\n" + transcript_path.read_text()
-                )
-            except Exception:
-                logging.exception("summarization failed; transcript left as-is")
-        if session.started_at and session.ended_at:
-            header = _session_header(session.started_at, session.ended_at)
-            transcript_path.write_text(header + transcript_path.read_text())
-        final_path = _flatten_session(
-            out, transcript_path, session.chunk_files, cfg.sample_rate, args.keep_audio
-        )
-        logging.info("transcript: %s", final_path)
+    if args.no_transcribe:
+        logging.info("recording: %s", session.recording_path)
+        return
+
+    from .pipeline import process_recording
+    from .transcriber import make_backend
+
+    transcript = process_recording(
+        session.recording_path,
+        backend=make_backend(args.model),
+        cfg=cfg,
+        use_aec=not args.no_aec,
+        diarize=not args.no_diarize,
+    )
+
+    transcript_path = out / "transcript.md"
+    transcript_path.write_text(transcript.render())
+
+    if not args.no_summary and transcript.segments:
+        from .summarizer import make_summarizer
+
+        logging.info("summarizing...")
+        summarizer = make_summarizer(args.summary_model, n_ctx=args.n_ctx)
+        try:
+            summary = summarizer.summarize_meeting(transcript_path.read_text())
+            transcript_path.write_text(summary + "\n\n---\n\n" + transcript_path.read_text())
+        except Exception:
+            logging.exception("summarization failed; transcript left as-is")
+    if session.started_at and session.ended_at:
+        header = _session_header(session.started_at, session.ended_at)
+        transcript_path.write_text(header + transcript_path.read_text())
+    final_path = _flatten_session(out, transcript_path, args.keep_audio)
+    logging.info("transcript: %s", final_path)
 
 
 def _fmt_duration(delta: timedelta) -> str:
@@ -226,15 +247,15 @@ def _install_signal_handlers() -> None:
 
 def _run_note(args) -> None:
     """Mic-only note: capture -> ephemeral transcript -> directive-steered summary."""
+    import shutil
+
+    from .pipeline import process_recording
     from .summarizer import NOTE_PROMPT, make_summarizer
     from .transcriber import make_backend
-    from .worker import TranscriptionWorker
 
     out = _session_dir(args, "note")
     cfg = Config(
         out_dir=out,
-        chunk_seconds=args.chunk_seconds,
-        overlap_seconds=args.overlap_seconds,
         silence_stop_seconds=args.silence_stop_seconds or float("inf"),
     )
 
@@ -245,35 +266,28 @@ def _run_note(args) -> None:
     _install_signal_handlers()
 
     session = capture.CaptureSession(cfg, devices={capture.MIC: mic})
-    transcript_path = out / "transcript.md"
-    worker = TranscriptionWorker(
+    reason = session.run()
+    logging.info("session ended (%s): %.0fs recorded", reason, session.duration_seconds)
+
+    # Mic-only: no far-end reference to cancel against, and one voice to label.
+    transcript = process_recording(
+        session.recording_path,
         backend=make_backend(args.model),
-        out_path=transcript_path,
-        overlap_seconds=cfg.overlap_seconds,
-        rms_floor=cfg.transcribe_rms_floor,
-        no_speech_threshold=cfg.transcribe_no_speech_threshold,
-        compression_ratio_threshold=cfg.transcribe_compression_ratio_threshold,
+        cfg=cfg,
+        use_aec=False,
+        diarize=False,
         label_speakers=False,
     )
-    worker.start()
-    session.on_chunk = worker.enqueue
-
-    reason = session.run()
-    logging.info("session ended (%s): %d chunks", reason, len(session.chunk_files))
-    logging.info("waiting for transcription to finish...")
-    worker.finish()
-
-    import shutil
 
     note_path = _unique_path(out.parent / f"{out.name}.md")
-    if not worker.builder.segments:
+    if not transcript.segments:
         logging.warning("no speech transcribed; nothing to summarize")
         shutil.rmtree(out, ignore_errors=True)
         return
 
     logging.info("summarizing note...")
     summarizer = make_summarizer(args.summary_model, n_ctx=args.n_ctx)
-    summary = summarizer.summarize(transcript_path.read_text(), prompt=NOTE_PROMPT)
+    summary = summarizer.summarize(transcript.render(), prompt=NOTE_PROMPT)
     note_path.write_text(summary + "\n")
     shutil.rmtree(out, ignore_errors=True)
     logging.info("note: %s", note_path)
@@ -290,61 +304,22 @@ def _unique_path(path: Path) -> Path:
     return candidate
 
 
-def _flatten_session(out, transcript_path, chunk_files, sample_rate, keep_audio) -> Path:
+def _flatten_session(out, transcript_path, keep_audio) -> Path:
     """Move transcript.md up to <session-dir>.md.
 
-    Normally the session folder is removed afterwards. With ``keep_audio`` the
-    overlapping chunk WAVs are concatenated into a single ``recording.wav`` and
-    the folder is kept holding just that file.
+    Normally the session folder (and the recording inside it) is removed
+    afterwards. With ``keep_audio`` the folder is kept, holding just
+    ``recording.wav``.
     """
     import shutil
 
     final_path = _unique_path(out.parent / f"{out.name}.md")
     transcript_path.rename(final_path)
-    if keep_audio and chunk_files:
-        _concat_recording(out / "recording.wav", chunk_files, sample_rate)
-        shutil.rmtree(out / "chunks", ignore_errors=True)
+    if keep_audio:
+        logging.info("audio retained: %s", out / capture.RECORDING_NAME)
     else:
-        shutil.rmtree(out)
+        shutil.rmtree(out, ignore_errors=True)
     return final_path
-
-
-def _concat_recording(dest, chunk_files, sample_rate) -> None:
-    """Reconstruct a stereo WAV from the overlapping per-channel chunks.
-
-    Each chunk is placed at its absolute sample offset (overlaps overwrite with
-    identical audio), rebuilding a continuous track per channel. Mic goes to the
-    left channel, system to the right -- kept separate so neither can clip.
-    """
-    import numpy as np
-
-    from .capture import MIC, SYSTEM
-    from .wavio import read_wav, write_wav_stereo
-
-    tracks = _reconstruct_tracks(chunk_files, sample_rate, np, read_wav)
-    n = max((len(t) for t in tracks.values()), default=0)
-    left = tracks.get(MIC, np.zeros(n, dtype=np.float32))
-    right = tracks.get(SYSTEM, np.zeros(n, dtype=np.float32))
-    write_wav_stereo(dest, left, right, sample_rate)
-
-
-def _reconstruct_tracks(chunk_files, sample_rate, np, read_wav) -> dict:
-    """Place each channel's overlapping chunks into one continuous track."""
-    placements: dict[str, list[tuple[int, object]]] = {}
-    total = 0
-    for cf in chunk_files:
-        audio = read_wav(cf.path, target_rate=sample_rate)
-        start = round(cf.start_seconds * sample_rate)
-        placements.setdefault(cf.channel, []).append((start, audio))
-        total = max(total, start + len(audio))
-
-    tracks = {}
-    for channel, placed in placements.items():
-        track = np.zeros(total, dtype=np.float32)
-        for start, audio in placed:
-            track[start : start + len(audio)] = audio
-        tracks[channel] = track
-    return tracks
 
 
 if __name__ == "__main__":

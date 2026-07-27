@@ -1,0 +1,137 @@
+"""Offline processing of a finished recording -> transcript.
+
+Runs once the meeting has stopped, in order:
+
+    read recording.wav
+      -> AEC (subtract system bleed from the mic)
+      -> transcribe both channels
+      -> hallucination filter
+      -> diarize the system channel, label its segments
+      -> interleave into transcript.md
+
+Each stage is skippable, and each degrades to a warning rather than losing the
+transcript: a diarization failure costs speaker labels, not the meeting.
+"""
+
+import logging
+from pathlib import Path
+
+import numpy as np
+
+from .aec import cancel_echo, erle_db
+from .config import Config
+from .filters import drop_hallucinations
+from .recorder import RECORDING_RATE
+from .transcript import MIC, SYSTEM, Transcript
+from .wavio import read_wav, read_wav_stereo
+
+log = logging.getLogger(__name__)
+
+
+def load_recording(path: Path) -> tuple[np.ndarray, np.ndarray | None, int]:
+    """Read a session recording as (mic, system, rate). System is None if mono."""
+    import wave
+
+    with wave.open(str(path), "rb") as w:
+        channels = w.getnchannels()
+    if channels == 1:
+        audio = read_wav(path, target_rate=RECORDING_RATE)
+        return audio, None, RECORDING_RATE
+    mic, system, rate = read_wav_stereo(path, target_rate=RECORDING_RATE)
+    return mic, system, rate
+
+
+def process_recording(
+    recording_path: Path,
+    backend,
+    cfg: Config,
+    *,
+    use_aec: bool = True,
+    diarize: bool = True,
+    label_speakers: bool = True,
+) -> Transcript:
+    """Turn a finished recording into a `Transcript`."""
+    mic, system, rate = load_recording(recording_path)
+    log.info("processing %.0fs of audio", len(mic) / rate if rate else 0)
+
+    if system is not None and use_aec:
+        mic = _cancel(mic, system, cfg)
+
+    transcript = Transcript(label_speakers=label_speakers)
+
+    log.info("transcribing mic...")
+    transcript.add(MIC, _transcribe(backend, mic, cfg))
+
+    if system is not None:
+        log.info("transcribing system audio...")
+        segments = _transcribe(backend, system, cfg)
+        if diarize and segments:
+            segments = _diarize(system, segments, cfg)
+        transcript.add(SYSTEM, segments)
+
+    return transcript
+
+
+def _cancel(mic: np.ndarray, system: np.ndarray, cfg: Config) -> np.ndarray:
+    """Run AEC, reporting how much echo it actually removed."""
+    log.info("cancelling echo...")
+    cleaned = cancel_echo(
+        mic,
+        system,
+        taps=cfg.aec_taps,
+        mu=cfg.aec_mu,
+        dtd_ratio=cfg.aec_dtd_ratio,
+    )
+    erle = erle_db(mic, cleaned, system, dtd_ratio=cfg.aec_dtd_ratio)
+    if erle <= 0.0:
+        # Either nothing ever played, or the speakers are loud enough that the
+        # echo alone exceeds aec_dtd_ratio, which starves the adaptation.
+        log.warning(
+            "echo cancellation removed nothing measurable (ERLE 0.0 dB) -- if the "
+            "far end was audible, try a larger --aec-dtd-ratio (currently %.2f)",
+            cfg.aec_dtd_ratio,
+        )
+    else:
+        log.info("echo cancellation: %.1f dB ERLE", erle)
+    return cleaned
+
+
+def _transcribe(backend, samples: np.ndarray, cfg: Config) -> list[dict]:
+    if not len(samples):
+        return []
+    raw = backend.transcribe(samples)
+    segments = drop_hallucinations(
+        raw,
+        no_speech_threshold=cfg.transcribe_no_speech_threshold,
+        compression_ratio_threshold=cfg.transcribe_compression_ratio_threshold,
+    )
+    log.info(
+        "  %d segment(s) (%d dropped as hallucination)", len(segments), len(raw) - len(segments)
+    )
+    return segments
+
+
+def _diarize(system: np.ndarray, segments: list[dict], cfg: Config) -> list[dict]:
+    """Label system segments by speaker; on failure, leave them generic.
+
+    The import is inside the guard too: a missing sherpa-onnx should degrade to
+    an unlabelled transcript like any other diarization failure, not lose the
+    meeting.
+    """
+    log.info("diarizing system audio...")
+    try:
+        from .diarize import Diarizer, assign_speakers
+
+        diarizer = Diarizer(
+            threshold=cfg.diarize_threshold,
+            min_duration_on=cfg.diarize_min_duration_on,
+            min_duration_off=cfg.diarize_min_duration_off,
+            num_speakers=cfg.diarize_num_speakers,
+        )
+        turns = diarizer.diarize(system, RECORDING_RATE)
+    except Exception:
+        log.exception("diarization failed; falling back to unlabelled 'them'")
+        return segments
+    speakers = len({t.speaker for t in turns})
+    log.info("  %d turn(s), %d speaker(s)", len(turns), speakers)
+    return assign_speakers(segments, turns)
