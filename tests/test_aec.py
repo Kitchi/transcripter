@@ -1,6 +1,6 @@
 import numpy as np
 
-from transcripter.aec import cancel_echo, erle_db
+from transcripter.aec import cancel_echo, echo_coherence, erle_db
 
 RATE = 16_000
 
@@ -111,6 +111,39 @@ def test_erle_zero_when_nothing_played():
     mine = _speechlike(RATE * 4, seed=5)
     silence = np.zeros_like(mine)
     assert erle_db(mine, mine, silence) == 0.0
+
+
+def test_coherence_separates_a_real_echo_path_from_none():
+    """The gate that decides whether running the filter is worthwhile at all."""
+    far = _speechlike(RATE * 8, seed=7)
+    echoed = _echo_of(far, delay=400, gain=0.15)
+    unrelated = _speechlike(RATE * 8, seed=8)  # headphones: mic hears only me
+
+    assert echo_coherence(echoed, far, RATE) > 0.5
+    assert echo_coherence(unrelated, far, RATE) < 0.1
+
+
+def test_coherence_is_zero_when_nothing_played():
+    mine = _speechlike(RATE * 4, seed=9)
+    assert echo_coherence(mine, np.zeros_like(mine), RATE) == 0.0
+    assert echo_coherence(np.zeros(0, np.float32), np.zeros(0, np.float32), RATE) == 0.0
+
+
+def test_never_amplifies_when_there_is_no_echo_path():
+    """The divergence guard, on the case that motivated it.
+
+    With no echo path the filter fits mic noise against a loud uncorrelated
+    reference and used to random-walk until it buried the signal -- a real
+    recording came out 25 dB louder than it went in. Cancellation can only ever
+    remove energy, so the output must never exceed the input.
+    """
+    far = _speechlike(RATE * 30, seed=10)
+    mine = _speechlike(RATE * 30, seed=11)  # uncorrelated with far
+
+    cleaned = cancel_echo(mine, far, taps=1024)
+
+    assert np.sqrt(np.mean(cleaned**2)) <= np.sqrt(np.mean(mine**2)) * 1.01
+    assert np.abs(cleaned).max() <= np.abs(mine).max() * 1.01
 
 
 def test_erle_reports_zero_for_a_noop_canceller():

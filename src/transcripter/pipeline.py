@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .aec import cancel_echo, erle_db
+from .aec import cancel_echo, echo_coherence, erle_db
 from .config import Config
 from .filters import drop_hallucinations
 from .recorder import RECORDING_RATE
@@ -73,8 +73,20 @@ def process_recording(
 
 
 def _cancel(mic: np.ndarray, system: np.ndarray, cfg: Config) -> np.ndarray:
-    """Run AEC, reporting how much echo it actually removed."""
-    log.info("cancelling echo...")
+    """Run AEC if there is an echo path, reporting how much it removed."""
+    coherence = echo_coherence(mic, system, rate=RECORDING_RATE)
+    if coherence < cfg.aec_coherence_threshold:
+        # Headphones, or the conferencing app already cancelled it. Adapting
+        # against an absent echo path fits mic noise to a loud reference and
+        # diverges, so skipping is not just an optimization.
+        log.info(
+            "no echo path detected (coherence %.3f < %.2f); skipping echo cancellation",
+            coherence,
+            cfg.aec_coherence_threshold,
+        )
+        return mic
+
+    log.info("cancelling echo (coherence %.3f)...", coherence)
     cleaned = cancel_echo(
         mic,
         system,
@@ -84,11 +96,14 @@ def _cancel(mic: np.ndarray, system: np.ndarray, cfg: Config) -> np.ndarray:
     )
     erle = erle_db(mic, cleaned, system, dtd_ratio=cfg.aec_dtd_ratio)
     if erle <= 0.0:
-        # Either nothing ever played, or the speakers are loud enough that the
-        # echo alone exceeds aec_dtd_ratio, which starves the adaptation.
+        # There is a measurable echo path, but the DTD found too few echo-only
+        # blocks to converge on -- typically speakers loud enough that the echo
+        # alone exceeds aec_dtd_ratio.
         log.warning(
-            "echo cancellation removed nothing measurable (ERLE 0.0 dB) -- if the "
-            "far end was audible, try a larger --aec-dtd-ratio (currently %.2f)",
+            "echo cancellation removed nothing measurable (ERLE %.1f dB) despite a "
+            "coherence of %.3f -- try a larger --aec-dtd-ratio (currently %.2f)",
+            erle,
+            coherence,
             cfg.aec_dtd_ratio,
         )
     else:
