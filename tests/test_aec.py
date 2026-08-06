@@ -1,20 +1,35 @@
 import numpy as np
 
-from transcripter.aec import cancel_echo, echo_coherence, erle_db
+from transcripter.aec import cancel_echo, erle_db, measure_echo_delay
 
 RATE = 16_000
 
 
-def _speechlike(n, seed):
-    """Band-limited noise bursts with pauses -- crude but speech-shaped."""
+def _speechlike(n, seed, smoothing=8):
+    """Band-limited noise bursts with pauses -- crude but speech-shaped.
+
+    `smoothing` sets the lowpass width. The default puts ~80% of the energy in
+    the 300-3400 Hz band the delay measurement looks at, as real speech does.
+    Widening it starves that band; see the narrowband test below.
+
+    Burst and gap lengths are irregular and seeded, so two speakers share
+    neither onsets nor a rhythm. Both matter for the delay measurement: two
+    talkers switching on at identical samples correlate at zero lag, and two
+    switching on at a *common period* correlate at the phase offset between
+    them. Either manufactures an echo path that is not there. Real speech has
+    no such periodicity, but a fixture built on a fixed on/off cycle does.
+    """
     rng = np.random.default_rng(seed)
     x = rng.standard_normal(n).astype(np.float32)
-    kernel = np.hanning(64).astype(np.float32)
+    kernel = np.hanning(smoothing).astype(np.float32)
     x = np.convolve(x, kernel / kernel.sum(), mode="same")
-    # Gate into ~0.5 s bursts so there are echo-only and quiet stretches.
+    # Gate into bursts so there are echo-only and quiet stretches to work with.
     env = np.zeros(n, dtype=np.float32)
-    for start in range(0, n, RATE):
-        env[start : start + RATE // 2] = 1.0
+    pos = 0
+    while pos < n:
+        on = int(rng.integers(RATE // 4, RATE))
+        env[pos : pos + on] = 1.0
+        pos += on + int(rng.integers(RATE // 4, RATE))
     return (x * env).astype(np.float32)
 
 
@@ -28,7 +43,7 @@ def _echo_of(far, delay, gain=0.3):
 def test_removes_pure_echo():
     far = _speechlike(RATE * 8, seed=0)
     near = _echo_of(far, delay=400, gain=0.15)
-    cleaned = cancel_echo(near, far, taps=1024)
+    cleaned = cancel_echo(near, far, reach=1024)
     assert erle_db(near, cleaned, far) > 15
 
 
@@ -37,8 +52,8 @@ def test_quieter_echo_is_cancelled_harder():
     far = _speechlike(RATE * 8, seed=0)
     loud = _echo_of(far, delay=400, gain=0.15)
     quiet = _echo_of(far, delay=400, gain=0.08)
-    erle_loud = erle_db(loud, cancel_echo(loud, far, taps=1024), far)
-    erle_quiet = erle_db(quiet, cancel_echo(quiet, far, taps=1024), far)
+    erle_loud = erle_db(loud, cancel_echo(loud, far, reach=1024), far)
+    erle_quiet = erle_db(quiet, cancel_echo(quiet, far, reach=1024), far)
     assert erle_quiet > erle_loud > 15
 
 
@@ -56,8 +71,8 @@ def test_coupling_above_dtd_ratio_disables_adaptation():
 
     # ERLE's own frame selection uses dtd_ratio too, so hold the *measurement*
     # threshold fixed at one that can see these frames and vary only the filter's.
-    starved = cancel_echo(near, far, taps=1024, dtd_ratio=0.05)
-    recovered = cancel_echo(near, far, taps=1024, dtd_ratio=0.5)
+    starved = cancel_echo(near, far, reach=1024, dtd_ratio=0.05)
+    recovered = cancel_echo(near, far, reach=1024, dtd_ratio=0.5)
 
     assert erle_db(near, starved, far, dtd_ratio=0.5) < 1
     assert erle_db(near, recovered, far, dtd_ratio=0.5) > 15
@@ -78,7 +93,7 @@ def test_preserves_near_speech_during_double_talk():
     mine[n // 2 :] = _speechlike(n, seed=2)[n // 2 :] * 0.8  # I join halfway
     near = _echo_of(far, delay=400, gain=0.15) + mine
 
-    cleaned = cancel_echo(near, far, taps=1024)
+    cleaned = cancel_echo(near, far, reach=1024)
 
     dt = slice(n // 2, n)  # the double-talk stretch
     # My voice survives: cleaned tracks what I said better than the raw mic did.
@@ -90,14 +105,14 @@ def test_preserves_near_speech_during_double_talk():
 
 def test_no_far_signal_leaves_mic_untouched():
     mine = _speechlike(RATE * 4, seed=3)
-    cleaned = cancel_echo(mine, np.zeros_like(mine), taps=1024)
+    cleaned = cancel_echo(mine, np.zeros_like(mine), reach=1024)
     np.testing.assert_allclose(cleaned, mine, atol=1e-6)
 
 
 def test_handles_unequal_lengths():
     far = _speechlike(RATE * 3, seed=4)
     near = _echo_of(far, delay=200)[: RATE * 2]
-    cleaned = cancel_echo(near, far, taps=512)
+    cleaned = cancel_echo(near, far, reach=1024)
     assert len(cleaned) == RATE * 2
 
 
@@ -113,20 +128,72 @@ def test_erle_zero_when_nothing_played():
     assert erle_db(mine, mine, silence) == 0.0
 
 
-def test_coherence_separates_a_real_echo_path_from_none():
-    """The gate that decides whether running the filter is worthwhile at all."""
-    far = _speechlike(RATE * 8, seed=7)
-    echoed = _echo_of(far, delay=400, gain=0.15)
-    unrelated = _speechlike(RATE * 8, seed=8)  # headphones: mic hears only me
+def test_measures_a_known_delay():
+    far = _speechlike(RATE * 30, seed=7)
+    near = _echo_of(far, delay=2000, gain=0.15)  # 125 ms, as seen in the wild
 
-    assert echo_coherence(echoed, far, RATE) > 0.5
-    assert echo_coherence(unrelated, far, RATE) < 0.1
+    found = measure_echo_delay(near, far, RATE)
+
+    assert abs(found.samples - 2000) < 16  # within 1 ms
+    assert found.sharpness > 15.0
 
 
-def test_coherence_is_zero_when_nothing_played():
+def test_sharpness_separates_a_real_echo_path_from_none():
+    """The gate that decides whether running the filter is worthwhile at all.
+
+    Thresholds here were set from negative controls on real recordings, where
+    impossible pairings scored ~5-6 and true echo paths 27-102. Anything that
+    cannot contain an echo must land far below `aec_sharpness_threshold`.
+    """
+    far = _speechlike(RATE * 30, seed=7)
+    echoed = _echo_of(far, delay=2000, gain=0.15)
+    unrelated = _speechlike(RATE * 30, seed=8)  # headphones: mic hears only me
+    reversed_far = far[::-1].copy()  # same spectrum, no causal relationship
+
+    assert measure_echo_delay(echoed, far, RATE).sharpness > 15.0
+    assert measure_echo_delay(unrelated, far, RATE).sharpness < 15.0
+    assert measure_echo_delay(echoed, reversed_far, RATE).sharpness < 15.0
+
+
+def test_narrowband_audio_does_not_fake_an_echo_path():
+    """The hazard the floored PHAT weighting exists for.
+
+    Pure PHAT gives every frequency bin an equal vote, including bins holding
+    nothing but the residue of whatever filter shaped the signal. When both
+    channels are thin inside the analysis band, that shared residue is all
+    there is to correlate, and two unrelated signals score like a real echo.
+    This is not hypothetical: the same mechanism made a mic correlate with its
+    own system channel played *backwards* at 30, and mis-read a real 127 ms
+    delay as 0.1 ms, until the weighting was floored.
+    """
+    far = _speechlike(RATE * 30, seed=20, smoothing=64)  # ~5% of energy in band
+    unrelated = _speechlike(RATE * 30, seed=21, smoothing=64)
+
+    assert measure_echo_delay(unrelated, far, RATE).sharpness < 15.0
+
+
+def test_delay_reports_the_minimum_across_a_shifting_path():
+    """The delay moves mid-meeting when a buffer resyncs.
+
+    Overshooting is far more costly than undershooting -- the filter cannot
+    model an echo that precedes its reference -- so the minimum is the safe
+    choice, not the mean.
+    """
+    far = _speechlike(RATE * 240, seed=12)
+    early = _echo_of(far[: RATE * 120], delay=1600, gain=0.15)
+    late = _echo_of(far[RATE * 120 :], delay=2600, gain=0.15)
+    near = np.concatenate([early, late])
+
+    found = measure_echo_delay(near, far, RATE)
+
+    assert abs(found.samples - 1600) < 32
+
+
+def test_delay_is_zero_when_nothing_played():
     mine = _speechlike(RATE * 4, seed=9)
-    assert echo_coherence(mine, np.zeros_like(mine), RATE) == 0.0
-    assert echo_coherence(np.zeros(0, np.float32), np.zeros(0, np.float32), RATE) == 0.0
+    assert measure_echo_delay(mine, np.zeros_like(mine), RATE).samples == 0
+    empty = np.zeros(0, np.float32)
+    assert measure_echo_delay(empty, empty, RATE).sharpness == 0.0
 
 
 def test_never_amplifies_when_there_is_no_echo_path():
@@ -140,7 +207,7 @@ def test_never_amplifies_when_there_is_no_echo_path():
     far = _speechlike(RATE * 30, seed=10)
     mine = _speechlike(RATE * 30, seed=11)  # uncorrelated with far
 
-    cleaned = cancel_echo(mine, far, taps=1024)
+    cleaned = cancel_echo(mine, far, reach=1024)
 
     assert np.sqrt(np.mean(cleaned**2)) <= np.sqrt(np.mean(mine**2)) * 1.01
     assert np.abs(cleaned).max() <= np.abs(mine).max() * 1.01

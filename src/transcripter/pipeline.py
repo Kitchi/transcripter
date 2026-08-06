@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .aec import cancel_echo, echo_coherence, erle_db
+from .aec import cancel_echo, erle_db, measure_echo_delay
 from .config import Config
 from .filters import drop_hallucinations
 from .recorder import RECORDING_RATE
@@ -73,42 +73,62 @@ def process_recording(
 
 
 def _cancel(mic: np.ndarray, system: np.ndarray, cfg: Config) -> np.ndarray:
-    """Run AEC if there is an echo path, reporting how much it removed."""
-    coherence = echo_coherence(mic, system, rate=RECORDING_RATE)
-    if coherence < cfg.aec_coherence_threshold:
+    """Measure the echo delay, align, cancel, and put the timeline back.
+
+    The recorder interleaves two independently-clocked streams without
+    timestamps, so the mic trails the system channel by an amount that is
+    specific to the recording -- 127 ms and 110 ms on the two meetings measured.
+    Cancelling without correcting for it costs most of the achievable ERLE, so
+    the delay is measured here rather than configured.
+    """
+    delay = measure_echo_delay(
+        mic, system, rate=RECORDING_RATE, min_sharpness=cfg.aec_sharpness_threshold
+    )
+    if delay.sharpness < cfg.aec_sharpness_threshold:
         # Headphones, or the conferencing app already cancelled it. Adapting
         # against an absent echo path fits mic noise to a loud reference and
         # diverges, so skipping is not just an optimization.
         log.info(
-            "no echo path detected (coherence %.3f < %.2f); skipping echo cancellation",
-            coherence,
-            cfg.aec_coherence_threshold,
+            "no echo path detected (correlation sharpness %.1f < %.1f); "
+            "skipping echo cancellation",
+            delay.sharpness,
+            cfg.aec_sharpness_threshold,
         )
         return mic
 
-    log.info("cancelling echo (coherence %.3f)...", coherence)
+    n = min(len(mic), len(system))
+    lag = delay.samples
+    log.info(
+        "cancelling echo (delay %.0f ms, sharpness %.1f)...",
+        1000 * lag / RECORDING_RATE,
+        delay.sharpness,
+    )
+    aligned, reference = mic[lag:n], system[: n - lag]
     cleaned = cancel_echo(
-        mic,
-        system,
-        taps=cfg.aec_taps,
+        aligned,
+        reference,
+        block=cfg.aec_block,
+        reach=cfg.aec_reach,
         mu=cfg.aec_mu,
         dtd_ratio=cfg.aec_dtd_ratio,
     )
-    erle = erle_db(mic, cleaned, system, dtd_ratio=cfg.aec_dtd_ratio)
+    erle = erle_db(aligned, cleaned, reference, dtd_ratio=cfg.aec_dtd_ratio)
     if erle <= 0.0:
-        # There is a measurable echo path, but the DTD found too few echo-only
-        # blocks to converge on -- typically speakers loud enough that the echo
-        # alone exceeds aec_dtd_ratio.
+        # There is a real echo path, but the DTD found too few echo-only blocks
+        # to converge on -- typically speakers loud enough that the echo alone
+        # exceeds aec_dtd_ratio.
         log.warning(
             "echo cancellation removed nothing measurable (ERLE %.1f dB) despite a "
-            "coherence of %.3f -- try a larger --aec-dtd-ratio (currently %.2f)",
+            "clear echo path (sharpness %.1f) -- try a larger --aec-dtd-ratio "
+            "(currently %.2f)",
             erle,
-            coherence,
+            delay.sharpness,
             cfg.aec_dtd_ratio,
         )
     else:
         log.info("echo cancellation: %.1f dB ERLE", erle)
-    return cleaned
+    # Undo the shift, so mic and system timestamps still line up downstream.
+    return np.concatenate([mic[:lag], cleaned, mic[n:]])
 
 
 def _transcribe(backend, samples: np.ndarray, cfg: Config) -> list[dict]:

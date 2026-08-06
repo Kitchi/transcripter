@@ -30,20 +30,28 @@ class Config:
     # ...and those with a compression_ratio above this (repetition loops).
     transcribe_compression_ratio_threshold: float = 2.4
 
-    # Echo cancellation (see aec.py). Filter length in taps at the recording
-    # rate: 4096 @ 16 kHz covers ~256 ms of echo tail, comfortably more than
-    # the output + acoustic delay of speakers-to-mic.
-    aec_taps: int = 4096
+    # Echo cancellation (see aec.py). Echo-tail coverage in taps at the
+    # recording rate: 2048 @ 16 kHz covers ~128 ms, which matches the ~120 ms
+    # tail measured on real meetings once the bulk delay is aligned out. Longer
+    # is not safer -- every extra tap is another parameter fitted from the same
+    # adaptation opportunities, and 8192 cost 1-2 dB on both recordings.
+    aec_reach: int = 2048
+    # Update interval, independent of the reach above. 512 @ 16 kHz = 32 ms, so
+    # the double-talk detector decides eight times more often than the old
+    # single-block filter did -- which is what stops adaptation starving.
+    aec_block: int = 512
     aec_mu: float = 0.2
     # Adapt only on blocks that look echo-only (near power below this fraction
     # of far power); holding the filter through double-talk stops it
     # mis-adapting and injecting far-end audio into the mic.
     aec_dtd_ratio: float = 0.05
-    # Skip AEC entirely below this mic/system coherence: with headphones (or an
-    # app that already cancels) there is no echo path, and adapting against one
-    # that isn't there fits noise and diverges. Real room coupling sits well
-    # above 0.1 even when the echo is faint.
-    aec_coherence_threshold: float = 0.1
+    # Skip AEC entirely below this cross-correlation peak sharpness: with
+    # headphones (or an app that already cancels) there is no echo path, and
+    # adapting against one that isn't there fits noise and diverges. Controls
+    # that cannot contain an echo (a mic against an unrelated meeting's system
+    # channel, or against its own played backwards) score ~5-6; the two real
+    # recordings scored 27-102. 15 sits in the gap.
+    aec_sharpness_threshold: float = 15.0
 
     # Diarization (see diarize.py). Clustering threshold: smaller splits more
     # readily into distinct speakers. A conference mix reaches the diarizer

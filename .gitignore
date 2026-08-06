@@ -5,3 +5,7 @@ sessions/
 .pytest_cache/
 .ruff_cache/
 *.log
+
+# Agent-facing working notes, deliberately local-only.
+CLAUDE.md
+WORKLOG.md

@@ -6,85 +6,227 @@ deleting duplicate text afterwards, because it also recovers **double-talk** --
 the moments you and the far end speak at once, which text-level dedup throws
 away wholesale.
 
-The filter is a constrained frequency-domain (overlap-save) NLMS, the same class
-of algorithm Speex/WebRTC use internally, minus their residual-echo suppressor.
-Expect decent-not-great cancellation; `transcript.py`'s bleed dedup stays on as
-a net for whatever survives.
+Three stages, in order:
 
-Two safeguards matter as much as the filter itself, because the common failure
-mode in practice is not weak cancellation but *divergence*. When there is no
-echo path at all -- headphones, or a conferencing app that already ran its own
-AEC -- every adaptation fits mic noise against a loud, uncorrelated reference,
-and the filter random-walks until it drowns the signal it was meant to clean.
-So: `echo_coherence` lets a caller detect a null echo path and skip the filter
-entirely, and `cancel_echo` never returns a block louder than it received.
+1. `measure_echo_delay` finds *when* the echo arrives, by cross-correlation.
+2. The caller shifts the mic by that delay (see `pipeline._cancel`).
+3. `cancel_echo` predicts the echo from the far signal and subtracts it.
+
+Stage 1 is not optional. The mic and the system tap are separate CoreAudio
+streams on independent clocks, and `recorder.py` interleaves them by arrival
+order with no timestamp alignment, so the offset between the channels is
+whatever the buffering happened to be. Measured on two real meetings it was
+127 ms and 110 ms, drifting ~7 ppm and stepping 37 ms mid-session when a buffer
+resynced. Unaligned, the same recordings cancel 0.3-2.8 dB; aligned, 3.5-6.7 dB.
+
+Two properties of stage 3 drive the design.
+
+**The filter can only look backwards.** It predicts the mic from *past* far
+samples, so it cannot model an echo that arrives before its own reference.
+Shifting the mic too far is therefore much worse than shifting it too little:
+on a real recording, aligning 53 ms past the true delay dropped cancellation
+from 6.7 dB to 0.7 dB. `measure_echo_delay` returns the *minimum* delay seen
+across the session for exactly this reason.
+
+**Filter length and block length are decoupled** (a partitioned block filter,
+as in Speex/WebRTC). They pull in opposite directions, and the earlier
+single-block version welded them to the same number, which made the filter
+fragile: too short and it cannot cover the ~120 ms echo tail, so its predictions
+are wrong, the divergence guard rejects them, and the filter is repeatedly
+beaten back to zero; too long and each block spans so much time that almost none
+qualifies as echo-only, so adaptation starves. On real recordings the usable
+window was about one octave wide and sat in a different place per recording.
+Splitting `reach` into `block`-sized partitions satisfies both at once: long
+reach for the tail, short blocks for a responsive double-talk detector.
+
+`transcript.py`'s bleed dedup stays on as a net for whatever survives; expect
+this to reduce the bleed, not eliminate it.
 """
 
 import logging
+from dataclasses import dataclass
 
 import numpy as np
 
 log = logging.getLogger(__name__)
 
 # Consecutive echo-only blocks that must come out louder before the filter is
-# pulled back toward zero. One or two is ordinary adaptation transient; a run
-# means the filter is diverging.
-DIVERGENCE_RUN = 3
+# pulled back toward zero. A few is ordinary adaptation transient; a run means
+# the filter is diverging. At the default 32 ms block this is ~0.5 s.
+DIVERGENCE_RUN = 16
+
+# Echo lives in the speech band, and so does the cross-correlation evidence for
+# it. Above it sits a trap: both channels pass through the same decimation
+# filter in `recorder.py`, which stamps an identical spectral fingerprint on
+# each at *zero* lag. Full-band correlation locks onto that fingerprint instead
+# of the echo -- it scored 30 on a control pairing a mic against its own system
+# channel played backwards, where no echo can exist, and it mis-reported a real
+# 127 ms delay as 0.1 ms. Band-limiting drops those controls to ~6.
+SPEECH_BAND = (300.0, 3400.0)
+
+# How far to back off pure PHAT weighting, as a fraction of a frame's mean
+# cross-spectrum magnitude (see `_gcc_phat`). Pure PHAT gives an empty bin the
+# same vote as a loud one, which lets shared filter artifacts decide the answer
+# when either channel is thin inside the band.
+PHAT_FLOOR = 0.2
 
 
-def echo_coherence(
+@dataclass(frozen=True)
+class EchoDelay:
+    """Result of `measure_echo_delay`.
+
+    `samples` is how far the mic trails the system channel, and is what the
+    caller should shift the mic back by. `sharpness` is the confidence: how far
+    the correlation peak stands above the background. Controls that cannot
+    contain an echo score ~5-6; real echo paths score 30-100. Compare it against
+    `Config.aec_sharpness_threshold` to decide whether to cancel at all.
+    """
+
+    samples: int
+    sharpness: float
+
+
+def _gcc_phat(
+    near: np.ndarray,
+    far: np.ndarray,
+    rate: int,
+    window: int,
+    max_lag: int,
+    band: tuple[float, float],
+    floor: float = PHAT_FLOOR,
+) -> tuple[int, float] | None:
+    """Band-limited GCC-PHAT. Returns (lag in samples, sharpness), or None.
+
+    PHAT normalizes each frame's cross-spectrum to unit magnitude before
+    averaging, so the peak is decided by phase alignment alone. That keeps it
+    sharp no matter how coloured speech is, and stops a few loud frames from
+    dominating -- which plain cross-correlation does badly on speech.
+
+    Taken literally that normalization is dangerous: a bin holding nothing but
+    numerical dust is promoted to the same weight as one holding speech, so
+    whatever the two channels share down there -- a common filter response,
+    quantization -- drives the answer. `floor` divides by
+    `|R| + floor x mean|R|` instead, which leaves loud bins alone and keeps
+    empty ones empty. On the two real recordings it *raised* the true peak
+    (38 -> 55) while leaving the negative controls at ~5.5.
+
+    Averaged only over frames where the far end is actually playing; silent
+    frames carry no information about the delay and would dilute the average.
+    Returns None when there are too few such frames to average.
+    """
+    n = min(len(near), len(far))
+    nf = n // window
+    if nf < 2:
+        return None
+    far_f = far[: nf * window].reshape(nf, window)
+    power = (far_f.astype(np.float64) ** 2).mean(axis=1)
+    active = np.flatnonzero(power > max(float(np.median(power)), 1e-12))
+    if len(active) < 2:
+        return None
+
+    size = 2 * window  # zero-padded, so the correlation is linear not circular
+    freqs = np.fft.rfftfreq(size, 1.0 / rate)
+    keep = (freqs >= band[0]) & (freqs < band[1])
+    if not keep.any():
+        return None
+
+    acc = np.zeros(len(freqs), dtype=np.complex128)
+    for i in active:
+        s = slice(i * window, (i + 1) * window)
+        R = np.fft.rfft(near[s], size) * np.conj(np.fft.rfft(far[s], size))
+        mag = np.abs(R)
+        R /= mag + floor * float(mag[keep].mean()) + 1e-12  # floored PHAT weight
+        R[~keep] = 0.0
+        acc += R
+
+    r = np.fft.irfft(acc / len(active), size)
+    # Roll so lag 0 sits at index `max_lag`: negative lags become visible
+    # instead of wrapping around to the end of the buffer.
+    r = np.roll(r, max_lag)[: 2 * max_lag + 1]
+    peak = int(np.argmax(r))
+    background = float(np.median(np.abs(r))) + 1e-30
+    return peak - max_lag, float(r[peak]) / background
+
+
+def measure_echo_delay(
     near: np.ndarray,
     far: np.ndarray,
     rate: int = 16_000,
-    frame: int = 2048,
-    band: tuple[float, float] = (300.0, 3400.0),
-) -> float:
-    """Mean magnitude-squared coherence between mic and far end, 0..1.
+    *,
+    min_sharpness: float = 15.0,
+    max_lag_s: float = 0.5,
+    segment_s: float = 60.0,
+    window_s: float = 2.0,
+    band: tuple[float, float] = SPEECH_BAND,
+) -> EchoDelay:
+    """Find how far the mic trails the system channel, and how sure we are.
 
-    A linear echo path makes the mic partly a filtered copy of the far signal,
-    which coherence detects regardless of the delay or the room response -- so
-    this answers "is there any echo to cancel?" without first converging a
-    filter. Measured only over frames where the far end is actually playing
-    (above its median frame power); silent frames carry no information about
-    the path and would just dilute the average.
+    Measured per `segment_s` rather than once over the whole recording, because
+    the delay moves: clock drift walks it a few ms over a meeting, and a buffer
+    resync can step it tens of ms at once. Segments scoring below
+    `min_sharpness` are discarded as unreliable -- usually stretches where the
+    far end barely spoke.
 
-    Restricted to the speech band because that is where the echo lives and where
-    both channels have energy to compare. Values near 0 mean no echo path:
-    headphones, or an app that already cancelled it. Real acoustic coupling in
-    a room runs well above 0.1 even when the echo is quiet.
+    Returns the **minimum** delay across the surviving segments, not the mean.
+    Undershooting the delay costs a little cancellation; overshooting costs
+    nearly all of it, because the filter cannot model an echo arriving before
+    its reference. The reported `sharpness` is the median across all segments
+    that produced a peak, so a caller that gates on it sees the typical
+    confidence rather than the best or worst stretch.
+
+    `samples` is 0 when nothing scored above `min_sharpness`; check `sharpness`
+    against the same threshold rather than treating 0 as "no delay".
     """
     n = min(len(near), len(far))
-    nf = n // frame
-    if nf == 0:
-        return 0.0
-    near_f = near[: nf * frame].reshape(nf, frame)
-    far_f = far[: nf * frame].reshape(nf, frame)
-    power = (far_f.astype(np.float64) ** 2).mean(axis=1)
-    active = power > max(float(np.median(power)), 1e-12)
-    if not active.any():
-        return 0.0
+    if n == 0:
+        return EchoDelay(0, 0.0)
+    window = int(window_s * rate)
+    max_lag = int(max_lag_s * rate)
+    if window < 2 or max_lag >= window:
+        raise ValueError("window_s must be at least twice max_lag_s")
 
-    window = np.hanning(frame)
-    X = np.fft.rfft(far_f[active] * window, axis=1)
-    D = np.fft.rfft(near_f[active] * window, axis=1)
-    # Cross- and auto-spectra averaged over frames: coherence is only meaningful
-    # as an average, since any single frame is trivially "coherent".
-    Sxy = (D * np.conj(X)).mean(axis=0)
-    Sxx = (np.abs(X) ** 2).mean(axis=0)
-    Syy = (np.abs(D) ** 2).mean(axis=0)
-    coh = np.abs(Sxy) ** 2 / (Sxx * Syy + 1e-20)
+    step = max(int(segment_s * rate), window * 2)
+    delays: list[int] = []
+    scores: list[float] = []
+    for start in range(0, n, step):
+        stop = min(start + step, n)
+        # The mic may trail by up to max_lag, so let it read past the segment
+        # end; the far slice sets the alignment reference.
+        found = _gcc_phat(
+            near[start : min(stop + max_lag, len(near))],
+            far[start:stop],
+            rate,
+            window,
+            max_lag,
+            band,
+        )
+        if found is None:
+            continue
+        lag, sharpness = found
+        scores.append(sharpness)
+        if sharpness >= min_sharpness and lag >= 0:
+            delays.append(lag)
 
-    freqs = np.fft.rfftfreq(frame, 1.0 / rate)
-    in_band = (freqs >= band[0]) & (freqs < band[1])
-    if not in_band.any():
-        return 0.0
-    return float(coh[in_band].mean())
+    if not scores:
+        return EchoDelay(0, 0.0)
+    typical = float(np.median(scores))
+    if not delays:
+        return EchoDelay(0, typical)
+    log.debug(
+        "echo delay: %d/%d segments usable, %.0f-%.0f ms",
+        len(delays),
+        len(scores),
+        1000 * min(delays) / rate,
+        1000 * max(delays) / rate,
+    )
+    return EchoDelay(min(delays), typical)
 
 
 def cancel_echo(
     near: np.ndarray,
     far: np.ndarray,
-    taps: int = 4096,
+    block: int = 512,
+    reach: int = 2048,
     mu: float = 0.2,
     leak: float = 1e-3,
     reg_frac: float = 0.1,
@@ -93,12 +235,18 @@ def cancel_echo(
 ) -> np.ndarray:
     """Predict the echo of `far` present in `near` and subtract it.
 
-    Returns the cleaned near signal, same length as the shorter input. `taps`
-    sets the echo-tail coverage (taps/rate seconds) and must exceed the combined
-    output and acoustic delay from speaker to mic.
+    Returns the cleaned near signal, same length as the shorter input. Shift
+    `near` by `measure_echo_delay` first; this filter models only what remains.
 
-    Per-bin power normalization whitens the colored far signal, but weak bins are
-    floored to `reg_frac` of the *average* bin power -- flooring to a tiny
+    A partitioned block frequency-domain NLMS. `reach` sets the echo-tail
+    coverage (reach/rate seconds) and is split into ceil(reach/block)
+    partitions, each convolved by overlap-save against a correspondingly delayed
+    frame of `far`. `block` sets how often the filter updates and how finely the
+    double-talk detector can decide -- the two are independent here, which is
+    the point (see the module docstring).
+
+    Per-bin power normalization whitens the colored far signal, but weak bins
+    are floored to `reg_frac` of the *average* bin power -- flooring to a tiny
     constant instead lets low-energy bins of real speech starve and diverge.
     `leak` bleeds the filter toward zero each block so it cannot grow unbounded.
 
@@ -115,32 +263,38 @@ def cancel_echo(
     bounds the output by the input no matter how badly adaptation misbehaves,
     which matters most when there is no echo path to find in the first place.
     """
-    L = taps
-    N = 2 * L
+    B = block
+    K = max(1, -(-reach // B))  # partitions, ceil division
+    N = 2 * B
     n = min(len(near), len(far))
     if n == 0:
         return np.zeros(0, dtype=np.float32)
-    pad = (-n) % L
+    pad = (-n) % B
     near_p = np.concatenate([near[:n], np.zeros(pad, np.float32)])
     far_p = np.concatenate([far[:n], np.zeros(pad, np.float32)])
-    nblocks = len(near_p) // L
+    nblocks = len(near_p) // B
 
-    W = np.zeros(N, dtype=np.complex128)  # frequency-domain filter
-    scale = N * float(np.mean(far_p**2) + 1e-12)  # typical bin power
-    P = np.full(N, scale)  # per-bin far power (EMA), warm-started off zero
-    x_prev = np.zeros(L, dtype=np.float32)
+    W = np.zeros((K, N), dtype=np.complex128)  # one frequency-domain partition each
+    # Far-frame history, newest first: partition k convolves against the frame
+    # from k blocks ago, which is what makes the partitions tile a long filter.
+    hist = np.zeros((K, N), dtype=np.complex128)
+    # Per-bin far power (EMA) summed over the whole filter span, warm-started
+    # off zero so the first blocks are not divided by nothing.
+    P = np.full(N, K * N * float(np.mean(far_p**2) + 1e-12))
+    x_prev = np.zeros(B, dtype=np.float32)
     out = np.zeros(len(near_p), dtype=np.float32)
     adapted = 0
     diverged = 0
     run = 0  # consecutive echo-only blocks that came out louder
 
     for b in range(nblocks):
-        x = far_p[b * L : (b + 1) * L]
-        d = near_p[b * L : (b + 1) * L]
-        X = np.fft.fft(np.concatenate([x_prev, x]))
-        y = np.real(np.fft.ifft(X * W))[L:]  # overlap-save: last L = linear conv
+        x = far_p[b * B : (b + 1) * B]
+        d = near_p[b * B : (b + 1) * B]
+        hist = np.roll(hist, 1, axis=0)
+        hist[0] = np.fft.fft(np.concatenate([x_prev, x]))
+        y = np.real(np.fft.ifft((W * hist).sum(axis=0)))[B:]  # overlap-save
         e = d - y
-        P = lam * P + (1 - lam) * np.abs(X) ** 2  # far statistics, every block
+        P = lam * P + (1 - lam) * (np.abs(hist) ** 2).sum(axis=0)
         near_pow = float(np.mean(d**2))
         echo_only = near_pow < dtd_ratio * float(np.mean(x**2))
 
@@ -158,18 +312,25 @@ def cancel_echo(
                     run = 0
         elif echo_only:
             run = 0
-            E = np.fft.fft(np.concatenate([np.zeros(L), e]))
+            E = np.fft.fft(np.concatenate([np.zeros(B), e]))
             delta = reg_frac * float(P.mean()) + 1e-12  # floor weak bins to avg scale
-            G = np.conj(X) * E / (P + delta)
-            g = np.real(np.fft.ifft(G))
-            g[L:] = 0  # gradient constraint: keep only the causal L taps
-            W = (1 - leak) * W + mu * np.fft.fft(g)
+            G = np.conj(hist) * (E / (P + delta))
+            g = np.real(np.fft.ifft(G, axis=1))
+            g[:, B:] = 0  # gradient constraint: keep only the causal B taps each
+            W = (1 - leak) * W + mu * np.fft.fft(g, axis=1)
             adapted += 1
 
         x_prev = x
-        out[b * L : (b + 1) * L] = e
+        out[b * B : (b + 1) * B] = e
 
-    log.debug("aec: %d/%d blocks adapted, %d rejected as diverging", adapted, nblocks, diverged)
+    log.debug(
+        "aec: %d partitions x %d taps, %d/%d blocks adapted, %d rejected as diverging",
+        K,
+        B,
+        adapted,
+        nblocks,
+        diverged,
+    )
     return out[:n].astype(np.float32)
 
 

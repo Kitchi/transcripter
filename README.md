@@ -28,7 +28,10 @@ Linux (CUDA or CPU).
   `--speakers N`. Disable with `--no-diarize`.
 - **Echo cancellation** — an adaptive filter subtracts the speakers' output from
   your mic before transcription, so the far end doesn't appear twice and
-  talk-over survives. Disable with `--no-aec`.
+  talk-over survives. The mic-to-system delay is measured per recording by
+  cross-correlation and aligned out first; it varies by machine and setup
+  (127 ms and 110 ms on two test meetings) and cancelling without correcting for
+  it removes almost nothing. Disable with `--no-aec`.
 - **Transcript cleanup** — one-directional cross-channel dedup drops the mic's
   pickup of the speakers echoing `them`, and a hallucination filter removes
   Whisper's non-speech junk (silence fillers like "Thank you.", repetition
@@ -177,6 +180,15 @@ there is no far-end reference to cancel against and only one voice to label.
   achieved — if that reads `0.0 dB` while the far end was clearly audible, raise
   `--aec-dtd-ratio` (try `0.2`) or turn the speakers down. Headphones sidestep
   the problem entirely.
+- **Echo cancellation helps; it does not solve.** Measured 3.5–6.4 dB on two
+  real meetings. The transcript-level dedup remains the main defence against the
+  far end appearing twice. If the log says `no echo path detected`, that is
+  usually correct — headphones, or a meeting app that already cancels. To see
+  what it measured on a kept recording:
+
+  ```sh
+  python scripts/echo_delay.py <session-dir>/recording.wav --test-aec
+  ```
 - **Diarization quality is unverified.** The plumbing works, but the speaker
   clustering has not been validated against a real multi-speaker meeting; if
   everyone comes out as one speaker, lower `--diarize-threshold` or set

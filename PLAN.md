@@ -54,9 +54,40 @@ chunker, the transcription worker thread, and the overlap-dedup logic outright.
   land on both channels. Subtracting the predicted echo **before** transcription
   beats deleting duplicate text after, because it also recovers **double-talk** --
   moments where both sides speak, which text dedup throws away wholesale.
-- Constrained frequency-domain (overlap-save) NLMS, `aec_taps` long
-  (4096 @ 16 kHz ≈ 256 ms of echo tail). One continuous pass over the recording,
-  so the filter converges once rather than per chunk.
+- **Delay alignment comes first, and is not optional.** The mic and the system
+  tap are separate CoreAudio streams on independent clocks, and `recorder.py`
+  interleaves them by arrival order with no timestamps, so the mic trails the
+  system channel by a per-recording amount — 127 ms and 110 ms on the two
+  meetings measured, drifting ~6 ppm and stepping 37 ms mid-session on a buffer
+  resync. `measure_echo_delay` finds it by band-limited GCC-PHAT; `pipeline`
+  shifts the mic, cancels, and shifts back so downstream timestamps are
+  unaffected. Unaligned these recordings cancel 0.0–2.5 dB; aligned, 3.5–6.4 dB.
+- Returns the **minimum** delay across the session, never the mean. The filter
+  is causal-only, so it cannot model an echo arriving before its reference:
+  undershooting costs a little, overshooting costs nearly everything (aligning
+  53 ms past the true delay dropped one recording from 6.7 dB to 0.7 dB).
+- **Band-limit to 300–3400 Hz, and floor the PHAT weight** (`PHAT_FLOOR`). Both
+  channels pass through the same decimator, which stamps an identical spectral
+  fingerprint on each at zero lag; pure full-band PHAT locks onto that instead
+  of the echo. It scored 30 on a control pairing a mic against its own system
+  channel played backwards, and mis-read a true 127 ms delay as 0.1 ms. Band
+  limiting plus flooring drops the controls to ~5.5 and raises the true peaks.
+- **Gate on correlation sharpness, not coherence.** Peak height over background:
+  impossible pairings score ~5.5–6, real echo paths 27–130, so
+  `aec_sharpness_threshold = 15` sits in a wide gap. The previous coherence gate
+  scored 0.0006 against a 0.10 threshold on a recording with a real, cancellable
+  echo — it skipped cancellation entirely on both meetings.
+- **Partitioned block frequency-domain NLMS**: `aec_reach` of filter (2048 @
+  16 kHz ≈ 128 ms, matching the ~120 ms measured tail) split into `aec_block`
+  partitions (512 ≈ 32 ms). Decoupling the two is what makes it robust. Welded
+  together, as they were, one number had to satisfy contradictory demands: too
+  short and the filter cannot cover the tail, so its predictions are wrong, the
+  divergence guard rejects them and beats the filter back to zero (16119 of
+  40630 blocks rejected, 731 pullbacks, 0.1 dB); too long and each block spans
+  so much time that almost none is echo-only, so adaptation starves (110
+  updates for 8.4M parameters, 0.0 dB). The usable window was ~1 octave wide and
+  sat in a different place per recording. One continuous pass over the
+  recording, so the filter converges once rather than per chunk.
 - **Double-talk detector**: adapts only on blocks where mic power is below
   `aec_dtd_ratio` × system power; otherwise it holds the filter and keeps
   subtracting. **Caveat with teeth**: if the speakers are loud enough that the
@@ -223,6 +254,22 @@ chunker, the transcription worker thread, and the overlap-dedup logic outright.
   but not eliminated).
 - Loud speakers can starve the echo canceller's adaptation (see AEC above); the run
   log reports ERLE so this is visible rather than silent.
+- **Near-end speech damage is argued, not measured.** On real audio there is no
+  ground truth separating "removed echo" from "removed my voice". What is known:
+  the output is `near - W*far`, so the filter can only ever subtract a filtered
+  copy of the system channel; far-silent frames come back bit-identical; a
+  mic paired with an unrelated meeting's system channel comes back untouched
+  (ERLE 0.00 dB, −0.01 dB RMS); and the synthetic double-talk test holds
+  corr(cleaned, my voice) > 0.95. But on recording A the loud-both frames
+  keep only 20% of their power, which is consistent with a strong echo path and
+  *also* with over-subtraction. The honest acceptance test is transcription
+  quality — `scripts/aec_offline.py --transcribe` does that A/B and has not been
+  run on these recordings yet.
+- Echo cancellation is modest, not decisive: 3.5–6.4 dB on the two meetings
+  measured. `transcript.py`'s bleed dedup stays on as the net. The remaining
+  ceiling is the double-talk detector — the filter learns from only 4–18% of
+  blocks — so a residual-echo suppressor or a smarter DTD is the next lever, not
+  more taps.
 - The full recording sits on disk for the duration of the meeting. It is deleted
   after processing unless `--keep-audio`, but a crash now leaves audio behind
   (which is also what makes a re-run possible).
